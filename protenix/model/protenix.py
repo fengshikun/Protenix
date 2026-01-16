@@ -92,7 +92,7 @@ class Protenix(nn.Module):
             elif train_sampler_type == 'RealUniformSamplerSquare':
                 self.train_noise_sampler = RealUniformSamplerSquare(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
             else:
-                self.train_noise_sampler = RealUnifromSamplerLogisticnorm(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'], lognorm_std=configs.ddbm_configs.get('lognorm_std', 1.0), lognorm_mean=configs.ddbm_configs.get('lognorm_mean', 0.0))
+                self.train_noise_sampler = RealUnifromSamplerLogisticnorm(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'], lognorm_std=configs.ddbm_configs.get('lognorm_std', 1.0), lognorm_mean=configs.ddbm_configs.get('lognorm_mean', 0.0), raw_sigma=configs.ddbm_configs.get('raw_sigma', False))
             
             
             # inference_noise_schedule = {}
@@ -111,7 +111,10 @@ class Protenix(nn.Module):
                     rho=configs.ddbm_configs['rho'],
                 )
             else:
-                self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-3)
+                if configs.ddbm_configs.get('align_af3', False):
+                    self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-1)
+                else:
+                    self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-3)
             
             # configs.inference_noise_scheduler.sigma_data = 1.0
             # configs.inference_noise_scheduler.s_min = 0.0001

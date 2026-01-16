@@ -170,19 +170,24 @@ class RealUniformSamplerSquare:
         return ts, torch.ones_like(ts)
 
 class RealUnifromSamplerLogisticnorm: 
-    def __init__(self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0): 
+    def __init__(self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0, raw_sigma=False): 
         self.sigma_max = sigma_max 
         self.sigma_min = sigma_min 
         self.lognorm_mean = lognorm_mean
         self.lognorm_std = lognorm_std
+        self.raw_sigma = raw_sigma
     
     def sample(self, batch_size, device): # LogNormal sampling 
         # ts = torch.distributions.LogisticNormal( self.lognorm_mean, self.lognorm_std ).sample((batch_size,)).to(device) # 若你仍然希望限制在 [sigma_min, sigma_max] 
         z = torch.randn(batch_size, device=device) * self.lognorm_std + self.lognorm_mean
         u = torch.sigmoid(z)  # (0,1)
         
-        ts = u*(self.sigma_max**2 - self.sigma_min**2) + self.sigma_min**2 
-        return torch.sqrt(ts), torch.ones_like(ts)
+        if not self.raw_sigma:
+            ts = u*(self.sigma_max**2 - self.sigma_min**2) + self.sigma_min**2 
+            return torch.sqrt(ts), torch.ones_like(ts)
+        else:
+            ts = u*(self.sigma_max - self.sigma_min) + self.sigma_min
+            return ts, torch.ones_like(ts)
 
 # class RealUnifromSamplerLogisticnorm:
 #     def __init__(
@@ -566,9 +571,11 @@ def get_d_vp(x, denoised, x_T, std_t,logsnr_t, logsnr_T, logs_t, logs_T, s_t_der
     else:
         return d
 
-def bridge_sample_dbim(x0, xT, t, noise, noise_schedule):
+def bridge_sample_dbim(x0, xT, t, noise, noise_schedule, get_abc=False):
     a_t, b_t, c_t = [append_dims(item, x0.ndim) for item in noise_schedule.get_abc(t)]
     samples = a_t * xT + b_t * x0 + c_t * noise
+    if get_abc:
+        return samples, a_t, b_t, c_t
     return samples
 
 def sample_diffusion_ddbm(
@@ -652,22 +659,28 @@ def sample_diffusion_ddbm(
         # c_skip = c_skip.to(x.dtype)
         # c_in = c_in.to(x.dtype)
         # c_out = c_out.to(x.dtype)
-        x0_hat = denoiser(
-                    x_noisy=x,
-                    t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
-                    input_feature_dict=input_feature_dict,
-                    s_inputs=s_inputs,
-                    s_trunk=s_trunk,
-                    z_trunk=z_trunk,
-                    chunk_size=attn_chunk_size,
-                    inplace_safe=inplace_safe,
-                    c_in=c_in,
-                    c_skip=c_skip,
-                    c_out=c_out,
-                )
-                
-                # denoised = denoiser(x, sigmas[i] * s_in, x_T)
-                # denoised = denoiser(x, sigmas[i] * s_in, x_T)
+        center = x.mean(dim=1, keepdim=True)   # (sample_num, 1, 3)
+        x = x - center 
+        
+        if not ddbm_configs.get('align_af3', False):
+            x0_hat = denoiser(
+                        x_noisy=x,
+                        t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
+                        input_feature_dict=input_feature_dict,
+                        s_inputs=s_inputs,
+                        s_trunk=s_trunk,
+                        z_trunk=z_trunk,
+                        chunk_size=attn_chunk_size,
+                        inplace_safe=inplace_safe,
+                        c_in=c_in,
+                        c_skip=c_skip,
+                        c_out=c_out,
+                    )
+                    
+                    # denoised = denoiser(x, sigmas[i] * s_in, x_T)
+                    # denoised = denoiser(x, sigmas[i] * s_in, x_T)
+        else:
+            x0_hat = torch.zeros_like(x)
         
         # repeat seed for each sample in the batch
         batch_num = x.shape[0]
@@ -677,7 +690,14 @@ def sample_diffusion_ddbm(
         first_noise = noise
         if mask is not None:
             x0_hat = x0_hat * mask + x_T * (1 - mask)
-        x = bridge_sample_dbim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule)
+        
+        if ddbm_configs.get('align_af3', False):
+            x, a_t, b_t, c_t = bridge_sample_dbim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule, get_abc=True)
+        else:
+            x = bridge_sample_dbim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule)
+        
+        
+        
         path.append(x.detach().cpu())
         pred_x0.append(x0_hat.detach().cpu())
         nfe += 1
@@ -692,19 +712,41 @@ def sample_diffusion_ddbm(
             # c_skip = c_skip.to(x.dtype)
             # c_in = c_in.to(x.dtype)
             # c_out = c_out.to(x.dtype)
-            x0_hat = denoiser(
-                        x_noisy=x,
-                        t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
+            
+            if ddbm_configs.get('align_af3', False):
+                x_align = (x - a_t * x_T) / b_t
+                batch_sigmas_align = c_t / b_t
+                batch_sigmas_align = batch_sigmas_align.squeeze()
+                if batch_sigmas_align.dim() == 0:
+                    batch_sigmas_align = batch_sigmas_align.unsqueeze(dim=0)
+                center = x_align.mean(dim=1, keepdim=True) 
+                x_align = x_align - center
+                x0_hat = denoiser(
+                        x_noisy=x_align,
+                        t_hat_noise_level=batch_sigmas_align, # not matter when provide the c_in, c_skip and c_out
                         input_feature_dict=input_feature_dict,
                         s_inputs=s_inputs,
                         s_trunk=s_trunk,
                         z_trunk=z_trunk,
                         chunk_size=attn_chunk_size,
                         inplace_safe=inplace_safe,
-                        c_in=c_in,
-                        c_skip=c_skip,
-                        c_out=c_out,
                     )
+            else:
+                center = x.mean(dim=1, keepdim=True)   # (sample_num, 1, 3)
+                x = x - center 
+                x0_hat = denoiser(
+                            x_noisy=x,
+                            t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
+                            input_feature_dict=input_feature_dict,
+                            s_inputs=s_inputs,
+                            s_trunk=s_trunk,
+                            z_trunk=z_trunk,
+                            chunk_size=attn_chunk_size,
+                            inplace_safe=inplace_safe,
+                            c_in=c_in,
+                            c_skip=c_skip,
+                            c_out=c_out,
+                        )
             # x0_hat = denoiser(x, s * ones)
             if mask is not None:
                 x0_hat = x0_hat * mask + x_T * (1 - mask)
@@ -726,6 +768,13 @@ def sample_diffusion_ddbm(
             noise = generator.randn_like(x0_hat)
 
             x = coeff_x0_hat * x0_hat + coeff_xT * x_T + coeff_xs * x + (1 if i != len(ts) - 2 else 0) * omega_st * noise
+            
+            if ddbm_configs.get('align_af3', False):
+                a_t = coeff_xT
+                b_t = coeff_x0_hat
+                c_t = (1 if i != len(ts) - 2 else 0) * omega_st
+            else:
+                pass
 
             path.append(x.detach().cpu())
             pred_x0.append(x0_hat.detach().cpu())
@@ -1314,14 +1363,20 @@ def sample_diffusion_training_ddbm(
     noise = torch.randn_like(x_gt_augment, dtype=dtype)
     
     
-    def bridge_sample(x0, xT, t):
+    def bridge_sample(x0, xT, t, get_abc=False):
         t = t.view(t.shape + (1,) * (x0.dim() - t.dim()))
         # t = append_dims(t, dims)
         # std_t = torch.sqrt(t)* torch.sqrt(1 - t / self.sigma_max)
         if ddbm_configs["pred_mode"].startswith('ve'):
             std_t = t* torch.sqrt(1 - t**2 / ddbm_configs['sigma_max']**2)
+            c_t = std_t
             mu_t= t**2 / ddbm_configs['sigma_max']**2 * xT + (1 - t**2 / ddbm_configs['sigma_max']**2) * x0
+            b_t =  (1 - t**2 / ddbm_configs['sigma_max']**2)
+            a_t = t**2 / ddbm_configs['sigma_max']**2
             samples = (mu_t +  std_t * noise )
+            if get_abc:
+                return samples, a_t, b_t, c_t
+            
         elif ddbm_configs["pred_mode"].startswith('vp'):
             logsnr_t = vp_logsnr(t, ddbm_configs['beta_d'], ddbm_configs['beta_min'])
             logsnr_T = vp_logsnr(ddbm_configs['sigma_max'], ddbm_configs['beta_d'], ddbm_configs['beta_min'])
@@ -1336,8 +1391,14 @@ def sample_diffusion_training_ddbm(
             
         return samples
     
-        
-    x_noisy = bridge_sample(x_start, x_gt_augment, sigmas)
+    
+    if ddbm_configs.get('align_af3', False):
+        x_noisy, a_t, b_t, c_t = bridge_sample(x_gt_augment, x_start, sigmas, get_abc=True)
+        x_noisy_align = (x_noisy -  a_t * x_start)  / b_t
+        sigmas_align = (c_t / b_t).squeeze()
+    else:
+        # x_noisy = bridge_sample(x_start, x_gt_augment, sigmas)
+        x_noisy = bridge_sample(x_gt_augment, x_start, sigmas)
 
     c_skip, c_out, c_in = get_bridge_scalings(ddbm_configs, sigmas)
     
@@ -1354,18 +1415,29 @@ def sample_diffusion_training_ddbm(
     # Get denoising outputs [..., N_sample, N_atom, 3]
     diffusion_chunk_size = None
     if diffusion_chunk_size is None:
-        x_denoised = denoise_net(
-            x_noisy=x_noisy,
-            t_hat_noise_level=sigmas,
-            input_feature_dict=input_feature_dict,
-            s_inputs=s_inputs,
-            s_trunk=s_trunk,
-            z_trunk=z_trunk,
-            use_conditioning=use_conditioning,
-            c_in=c_in,
-            c_skip=c_skip,
-            c_out=c_out,
-        )
+        if ddbm_configs.get('align_af3', False):
+            x_denoised = denoise_net(
+                x_noisy=x_noisy_align,
+                t_hat_noise_level=sigmas_align,
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s_trunk,
+                z_trunk=z_trunk,
+                use_conditioning=use_conditioning,
+            )
+        else:
+            x_denoised = denoise_net(
+                x_noisy=x_noisy,
+                t_hat_noise_level=sigmas,
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s_trunk,
+                z_trunk=z_trunk,
+                use_conditioning=use_conditioning,
+                c_in=c_in,
+                c_skip=c_skip,
+                c_out=c_out,
+            )
     else:
         x_denoised = []
         no_chunks = N_sample // diffusion_chunk_size + (

@@ -171,10 +171,13 @@ model_configs = {
       
       "lognorm_std": 1.0,
       "lognorm_mean": 0.0,
+      "raw_sigma": False,
       
       "pred_mode": "vp",
       "sigma_max": 1.0,
       "sigma_min":0.0001,
+      
+      "align_af3": False,
     #   "sigma_data": 0.5,
     #   "sigma_data_end": 0.5,
       "sigma_data": 16.0,
