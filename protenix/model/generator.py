@@ -706,6 +706,9 @@ def sample_diffusion_ddbm(
             s = ts[i]
             t = ts[i + 1]
 
+            
+            a_t, b_t, c_t = [append_dims(item, x0_hat.ndim) for item in noise_schedule.get_abc(s)]
+            
             batch_sigmas = s * ones
             c_skip, c_in, c_out, c_noise , _ = precond.get_scalings_and_weightings(batch_sigmas, x.ndim)
             # convert c_skip, c_in, c_out to dtype of x
@@ -717,6 +720,7 @@ def sample_diffusion_ddbm(
                 x_align = (x - a_t * x_T) / b_t
                 batch_sigmas_align = c_t / b_t
                 batch_sigmas_align = batch_sigmas_align.squeeze()
+                batch_sigmas_align = batch_sigmas_align * ones
                 if batch_sigmas_align.dim() == 0:
                     batch_sigmas_align = batch_sigmas_align.unsqueeze(dim=0)
                 center = x_align.mean(dim=1, keepdim=True) 
@@ -769,12 +773,14 @@ def sample_diffusion_ddbm(
 
             x = coeff_x0_hat * x0_hat + coeff_xT * x_T + coeff_xs * x + (1 if i != len(ts) - 2 else 0) * omega_st * noise
             
-            if ddbm_configs.get('align_af3', False):
-                a_t = coeff_xT
-                b_t = coeff_x0_hat
-                c_t = (1 if i != len(ts) - 2 else 0) * omega_st
-            else:
-                pass
+            # if ddbm_configs.get('align_af3', False) and i < len(indices) - 1:
+            #     # a_t = coeff_xT
+            #     # b_t = coeff_x0_hat
+            #     # c_t = (1 if i != len(ts) - 2 else 0) * omega_st
+            #     u = ts[i + 2] # u means t + 1
+            #     a_t, b_t, c_t = [append_dims(item, x0_hat.ndim) for item in noise_schedule.get_abc(u)]
+            # else:
+            #     pass
 
             path.append(x.detach().cpu())
             pred_x0.append(x0_hat.detach().cpu())
