@@ -167,7 +167,7 @@ class RealUniformSamplerSquare:
 
     def sample(self, batch_size, device):
         ts = torch.rand(batch_size).to(device) *(self.sigma_max**2 - self.sigma_min**2) + self.sigma_min**2
-        return ts, torch.ones_like(ts)
+        return torch.sqrt(ts), torch.ones_like(ts)
 
 class RealUnifromSamplerLogisticnorm: 
     def __init__(self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0, raw_sigma=False): 

@@ -988,7 +988,25 @@ class MMCIFParser:
         mol = mols[0]
         Chem.Kekulize(mol, clearAromaticFlags=False)
         # mol = Chem.RemoveHs(mol)
-        atoms = mol.GetAtoms()
+        if 'posebuster' in rdkit_mol_path:
+            emol = Chem.EditableMol(mol)
+
+            # ⚠️ 一定要倒序删原子
+            h_indices = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 1]
+            for idx in sorted(h_indices, reverse=True):
+                emol.RemoveAtom(idx)
+
+            mol_no_h = emol.GetMol()
+
+            # 可选：只做轻量 sanitize（不会改原子顺序）
+            Chem.SanitizeMol(
+                mol_no_h,
+                sanitizeOps=Chem.SanitizeFlags.SANITIZE_ADJUSTHS
+            )
+            mol = mol_no_h
+            atoms = mol_no_h.GetAtoms()
+        else:
+            atoms = mol.GetAtoms()
         
         mask = atom_array.res_name == 'UNL'
         if len(atoms) != mask.sum():

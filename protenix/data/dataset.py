@@ -478,7 +478,7 @@ class BaseSingleDataset(Dataset):
         
         
         # rdkit coordinate
-        if 'pdbbind' in self.name:
+        if 'pdbbind' in self.name or 'posebustersv2' in self.name:
             rdkit_coords = bioassembly_dict['rdkit_coords']
             apo_coords = bioassembly_dict['apo_coords']
             rdkit_idx = np.random.randint(rdkit_coords.shape[0])
@@ -616,7 +616,7 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
-        if 'pdbbind' in self.name and self.use_apo_pos:
+        if ('pdbbind' in self.name or 'posebustersv2' in self.name) and self.use_apo_pos:
             feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
             if self.cropping_configs['crop_size'] > -1:
                 feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]

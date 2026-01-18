@@ -605,7 +605,7 @@ class AF3Trainer(object):
             self.print(f"Testing on {test_name}")
             evaluated_pids = []
             total_batch_num = len(test_dl)
-            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2"]:
+            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2", "posebustersv2"]:
                 ligand_rmsds = []
                 pdb_rmsd_dict = {}
             
@@ -659,7 +659,7 @@ class AF3Trainer(object):
 
             metrics = simple_metric_wrapper.calc()
             
-            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2"]: # calculate the mean rmsd and rmsd < 2 or 5 A ratio
+            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2", "posebustersv2"]: # calculate the mean rmsd and rmsd < 2 or 5 A ratio
                 ratio_lt_2A = np.mean(np.array(ligand_rmsds) < 2.0)
                 ratio_lt_5A = np.mean(np.array(ligand_rmsds) < 5.0)
                 mean_rmsd = np.mean(ligand_rmsds)

@@ -403,6 +403,24 @@ data_configs = {
         },
         **deepcopy(default_test_configs),
     },
+    "posebustersv2": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/posebusterv2/posebusterv2"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v2_data/pdbbind",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": 
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/posebusterv2/posebuster_v2_test.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
     "msa": {
         "enable": False,
         "enable_rna_msa": False,
