@@ -485,10 +485,11 @@ class BaseSingleDataset(Dataset):
             rdkit_coords = rdkit_coords[rdkit_idx]
             # align to the original point
             rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
-            rotation = Rotation.random(num=1)
-            rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
-            rot_matrix = rot_matrix.squeeze(0).numpy()
-            rdkit_coords = rdkit_coords @ rot_matrix.T
+            if self.name == 'pdbbind_prot_ligand': # only training rotate
+                rotation = Rotation.random(num=1)
+                rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
+                rot_matrix = rot_matrix.squeeze(0).numpy()
+                rdkit_coords = rdkit_coords @ rot_matrix.T
             apo_coords = apo_coords - apo_coords.mean(axis=0)
             complex_apo_coords = np.concatenate((apo_coords, rdkit_coords), axis=0)
             bioassembly_dict['apo_atom_array'] = complex_apo_coords
@@ -952,6 +953,7 @@ class BaseSingleDataset(Dataset):
 
             label_full_dict["pocket_mask"] = pocket_mask
             label_full_dict["interested_ligand_mask"] = interested_ligand_mask
+            
 
         # Masks for Chain/Interface Metrics
         if self.find_eval_chain_interface:
@@ -1310,7 +1312,7 @@ def get_datasets(
         dataset_param["use_apo_pos"] = use_apo_pos
         train_dataset = BaseSingleDataset(**dataset_param)
         # for debug:
-        test_data = train_dataset[0]
+        # test_data = train_dataset[0]
         train_datasets.append(train_dataset)
         datapoint_weights.append(
             get_sample_weights(

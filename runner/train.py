@@ -44,7 +44,7 @@ from configs.configs_model_type import model_configs
 from protenix.config import parse_configs, parse_sys_args
 from protenix.config.config import save_config
 from protenix.data.dataloader import get_dataloaders
-from protenix.metrics.lddt_metrics import LDDTMetrics
+from protenix.metrics.lddt_metrics import LDDTMetrics, partially_aligned_rmsd
 from protenix.model.loss import ProtenixLoss
 from protenix.model.protenix import Protenix
 from protenix.utils.distributed import DIST_WRAPPER
@@ -563,7 +563,17 @@ class AF3Trainer(object):
             ligand_mask = batch['label_dict']['interested_ligand_mask']
             
             rmsd_dict = self.lddt_metrics.compute_ligand_rmsd_with_kabsch(complex_gt.cpu().numpy(),  complex_pred.cpu().numpy(), ligand_mask[0].cpu().numpy().astype(bool))
-            return lddt_dict, rmsd_dict
+            
+            rmsd_dict2 = {'ligand_rmsds': []}
+            pocket_mask = batch['label_dict']['pocket_mask'][0].cpu().numpy()
+            ligand_mask = batch['label_dict']['interested_ligand_mask'][0].cpu().numpy()
+            complex_gt = complex_gt.cpu().numpy()
+            complex_pred = complex_pred.cpu().numpy()
+            for complex_p in complex_pred:
+                pocket_rmsd_w_refl, lig_rmsd_w_refl, _, _ = partially_aligned_rmsd(complex_p, complex_gt, align_mask=pocket_mask, rmsd_mask=ligand_mask, reduce=True, allow_reflection=True,)
+                rmsd_dict2['ligand_rmsds'].append(lig_rmsd_w_refl)
+            
+            return lddt_dict, rmsd_dict2
 
         return lddt_dict
 
@@ -580,10 +590,10 @@ class AF3Trainer(object):
     def evaluate(self, mode: str = "eval"):
         if not self.configs.eval_ema_only:
             self._evaluate()
-        if hasattr(self, "ema_wrapper"):
-            self.ema_wrapper.apply_shadow()
-            self._evaluate(ema_suffix=f"ema{self.ema_wrapper.decay}_", mode=mode)
-            self.ema_wrapper.restore()
+        # if hasattr(self, "ema_wrapper"):
+        #     self.ema_wrapper.apply_shadow()
+        #     self._evaluate(ema_suffix=f"ema{self.ema_wrapper.decay}_", mode=mode)
+        #     self.ema_wrapper.restore()
 
     @torch.no_grad()
     def _evaluate(self, ema_suffix: str = "", mode: str = "eval"):
@@ -628,13 +638,22 @@ class AF3Trainer(object):
                 with enable_amp:
                     # Model forward
                     batch, _ = self.model_forward(batch, mode=mode)
+                    
+                    # save batch['pred_dict']['coordinate'] for debug
+                    test_output_folder = f'{self.configs.base_dir}/test_predictions'
+                    os.makedirs(test_output_folder, exist_ok=True)
+                    save_file_name = f"{test_output_folder}/{batch['basic']['pdb_id']}.npy"
+                    results_numpy = batch['pred_dict']['coordinate'].cpu().numpy()
+                    np.save(save_file_name, results_numpy)
+                    
+                    
                     # Loss forward
                     loss, loss_dict, batch = self.get_loss(batch, mode="eval")
                     # lDDT metrics
                     if 'interested_ligand_mask' in batch['label_dict']:
                         lddt_dict, rmsd_dict = self.get_metrics(batch)
                         ligand_rmsds.extend(rmsd_dict['ligand_rmsds'])
-                        pdb_rmsd_dict[batch['basic']['pdb_id']] = rmsd_dict['ligand_rmsds'].mean()
+                        pdb_rmsd_dict[batch['basic']['pdb_id']] = np.mean(rmsd_dict['ligand_rmsds'])
                     else:
                         lddt_dict = self.get_metrics(batch)
                     

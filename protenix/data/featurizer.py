@@ -598,6 +598,7 @@ class Featurizer(object):
             
             if not np.any(primary_chain_candidates):
                 # 对每条 protein chain，计算 backbone atoms 到 ligand 的最小距离
+                print("no 10 A found for this protein")
                 min_dist = np.inf
                 primary_chain_asym_id_int = None
 
