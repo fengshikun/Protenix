@@ -1,0 +1,6 @@
+started_at=20260305_124352
+run_name=DDP8-contrast-drugclipmask-v027-50k-20260305_124352
+log_path=/home/dataset-assist-0/tmp/zsl/zsl/Protenix/logs/train_5w_daemon_20260305_124352.log
+run_script=/home/dataset-assist-0/tmp/zsl/zsl/Protenix/logs/run_5w_daemon_20260305_124352.sh
+wandb_entity=1553731627-tianjin-university
+wandb_project=debug_qbiolip

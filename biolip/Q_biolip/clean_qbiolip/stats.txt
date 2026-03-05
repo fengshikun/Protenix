@@ -1,0 +1,6 @@
+merge_fail	73734
+drop_metal	22994
+drop_blacklist	15517
+drop_too_small	5401
+drop_bad_element	2042
+drop_too_large	248

@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
 from protenix.data.dataset import Dataset, get_datasets
 from protenix.utils.logger import get_logger
-from protenix.utils.torch_utils import collate_fn_first
+from protenix.utils.torch_utils import collate_fn_first, collate_fn_identity
 
 logger = get_logger(__name__)
 
@@ -317,6 +317,11 @@ def get_dataloaders(
 
     """
     train_dataset, test_datasets = get_datasets(configs, error_dir)
+    train_collate_fn = (
+        collate_fn_first
+        if int(configs.data.batch_size) <= 1
+        else collate_fn_identity
+    )
     if world_size > 1:
         train_sampler = DistributedWeightedSampler(
             train_dataset,
@@ -327,10 +332,10 @@ def get_dataloaders(
         )
         train_dl = DistributedDataLoader(
             dataset=train_dataset,
-            batch_size=1,
+            batch_size=configs.data.batch_size,
             shuffle=False,
             num_workers=configs.data.num_dl_workers,
-            collate_fn=collate_fn_first,
+            collate_fn=train_collate_fn,
             sampler=train_sampler,
         )
     else:
@@ -343,10 +348,10 @@ def get_dataloaders(
         )
         train_dl = IterDataLoader(
             dataset=train_dataset,
-            batch_size=1,
+            batch_size=configs.data.batch_size,
             shuffle=False,
             num_workers=configs.data.num_dl_workers,
-            collate_fn=collate_fn_first,
+            collate_fn=train_collate_fn,
             sampler=train_sampler,
         )
 

@@ -151,6 +151,8 @@ def compute_esm2_embeddings_online(
     toks_per_batch=4096,
     truncation_seq_length=4096,
 ):
+    if not trainable:
+        model.eval()
     dataset = FastaBatchedDataset(labels, sequences)
     batches = dataset.get_batch_indices(toks_per_batch, extra_toks_per_seq=1)
     data_loader = torch.utils.data.DataLoader(

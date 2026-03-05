@@ -58,43 +58,50 @@ class DataPipeline(object):
                 sample_indices_list (list[dict[str, Any]]): The sample indices list (each one is a chain or an interface).
                 bioassembly_dict (dict[str, Any]): The bioassembly dict with sequence, atom_array, and token_array.
         """
-        try:
-            if dataset == "WeightedPDB":
-                parser = MMCIFParser(mmcif_file=mmcif)
-                bioassembly_dict = parser.get_bioassembly()
-            elif dataset == "Distillation":
-                parser = DistillationMMCIFParser(mmcif_file=mmcif)
-                bioassembly_dict = parser.get_structure_dict()
-            else:
-                raise NotImplementedError(
-                    'Unsupported "dataset", please input either "WeightedPDB" or "Distillation".'
-                )
-
-            sample_indices_list = parser.make_indices(
-                bioassembly_dict=bioassembly_dict,
-                pdb_cluster_file=pdb_cluster_file,
-                interface_radius=interface_radius,
-            )
-            if len(sample_indices_list) == 0:
-                # empty indices and AtomArray
-                return [], bioassembly_dict
-
-            atom_array = bioassembly_dict["atom_array"]
-            atom_array.set_annotation(
-                "resolution", [parser.resolution] * len(atom_array)
+        # try:
+        if dataset == "WeightedPDB":
+            parser = MMCIFParser(mmcif_file=mmcif)
+            bioassembly_dict = parser.get_bioassembly()
+        elif dataset == "pdbbind":
+            parser = MMCIFParser(mmcif_file=mmcif)
+            mmcif2 = mmcif.replace(".cif", '_fake.cif')
+            parser2 = MMCIFParser(mmcif_file=mmcif2)
+            pdb_id = mmcif.split('/')[-2]
+            # bioassembly_dict = parser.get_bioassembly()
+            bioassembly_dict = parser.get_bioassembly2(parser2=parser2, pdb_id=pdb_id)
+        elif dataset == "Distillation":
+            parser = DistillationMMCIFParser(mmcif_file=mmcif)
+            bioassembly_dict = parser.get_structure_dict()
+        else:
+            raise NotImplementedError(
+                'Unsupported "dataset", please input either "WeightedPDB" or "Distillation".'
             )
 
-            tokenizer = AtomArrayTokenizer(atom_array)
-            token_array = tokenizer.get_token_array()
-            bioassembly_dict["msa_features"] = None
-            bioassembly_dict["template_features"] = None
+        sample_indices_list = parser.make_indices(
+            bioassembly_dict=bioassembly_dict,
+            pdb_cluster_file=pdb_cluster_file,
+            interface_radius=interface_radius,
+        )
+        if len(sample_indices_list) == 0:
+            # empty indices and AtomArray
+            return [], bioassembly_dict
 
-            bioassembly_dict["token_array"] = token_array
-            return sample_indices_list, bioassembly_dict
+        atom_array = bioassembly_dict["atom_array"]
+        atom_array.set_annotation(
+            "resolution", [parser.resolution] * len(atom_array)
+        )
 
-        except Exception as e:
-            logging.warning("Gen data failed for %s due to %s", mmcif, e)
-            return [], {}
+        tokenizer = AtomArrayTokenizer(atom_array)
+        token_array = tokenizer.get_token_array()
+        bioassembly_dict["msa_features"] = None
+        bioassembly_dict["template_features"] = None
+
+        bioassembly_dict["token_array"] = token_array
+        return sample_indices_list, bioassembly_dict
+
+        # except Exception as e:
+        #     logging.warning("Gen data failed for %s due to %s", mmcif, e)
+        #     return [], {}
 
     @staticmethod
     def get_label_entity_id_to_asym_id_int(atom_array: AtomArray) -> dict[str, int]:
@@ -289,7 +296,8 @@ class DataPipeline(object):
                 msa_features or {},
                 template_features or {},
                 -1,
-                -1, # for selected_indices
+                -1, # for selected_indices,
+                -1, # for atom indices,
             )
 
         ref_chain_indices = DataPipeline._map_ref_chain(
@@ -331,6 +339,7 @@ class DataPipeline(object):
             cropped_atom_array,
             cropped_msa_features,
             cropped_template_features,
+            cropped_atom_indices
         ) = crop.crop_by_indices(
             selected_token_indices=selected_indices,
             msa_features=msa_features,
@@ -352,6 +361,7 @@ class DataPipeline(object):
             cropped_template_features,
             reference_token_index,
             selected_indices,
+            cropped_atom_indices,
         )
 
     @staticmethod

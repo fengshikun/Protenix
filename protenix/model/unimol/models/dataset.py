@@ -57,7 +57,11 @@ class TokenizeDataset(BaseWrapperDataset):
     @lru_cache(maxsize=16)
     def __getitem__(self, index: int):
         raw_data = self.dataset[index]
-        assert len(raw_data) < self.max_seq_len and len(raw_data) > 0
+        # Be tolerant to malformed/edge-case ligands to keep long training runs alive.
+        if len(raw_data) == 0:
+            return torch.tensor([self.dictionary.unk()], dtype=torch.long)
+        elif len(raw_data) >= self.max_seq_len:
+            raw_data = raw_data[: self.max_seq_len - 1]
         return torch.from_numpy(self.dictionary.vec_index(raw_data)).long()
 
 class KeyDataset(BaseWrapperDataset):
@@ -132,12 +136,19 @@ class RemoveHydrogenDataset(BaseWrapperDataset):
         dd = self.dataset[index].copy()
         atoms = dd[self.atoms]
         coordinates = dd[self.coordinates]
+        raw_atoms = atoms
+        raw_coordinates = coordinates
 
         if self.remove_hydrogen:
             mask_hydrogen = atoms != "H"
             atoms = atoms[mask_hydrogen]
             #print(coordinates.shape)
             coordinates = coordinates[mask_hydrogen]
+            # Some ligands can become empty after hydrogen filtering.
+            # Fall back to raw arrays to avoid downstream empty-token crashes.
+            if len(atoms) == 0:
+                atoms = raw_atoms
+                coordinates = raw_coordinates
         if not self.remove_hydrogen and self.remove_polar_hydrogen:
             end_idx = 0
             for i, atom in enumerate(atoms[::-1]):
@@ -148,6 +159,9 @@ class RemoveHydrogenDataset(BaseWrapperDataset):
             if end_idx != 0:
                 atoms = atoms[:-end_idx]
                 coordinates = coordinates[:-end_idx]
+                if len(atoms) == 0:
+                    atoms = raw_atoms
+                    coordinates = raw_coordinates
         dd[self.atoms] = atoms
         dd[self.coordinates] = coordinates
         return dd

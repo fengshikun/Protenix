@@ -243,6 +243,7 @@ class DiffusionModule(nn.Module):
         blocks_per_ckpt: Optional[int] = None,
         use_fine_grained_checkpoint: bool = False,
         use_efficient_implementation: bool = False,
+        use_apo_pos: bool = False,
     ) -> None:
         """
         Args:
@@ -305,6 +306,7 @@ class DiffusionModule(nn.Module):
             c_z=c_z,
             blocks_per_ckpt=blocks_per_ckpt,
             use_efficient_implementation=use_efficient_implementation,
+            use_apo_pos=use_apo_pos,
         )
         # Alg20: line4
         self.layernorm_s = LayerNorm(c_s, create_offset=False)
@@ -502,6 +504,9 @@ class DiffusionModule(nn.Module):
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
         use_conditioning: bool = True,
+        c_in = None,
+        c_skip = None,
+        c_out =None,
     ) -> torch.Tensor:
         """One step denoise: x_noisy, noise_level -> x_denoised
 
@@ -529,10 +534,13 @@ class DiffusionModule(nn.Module):
         # As in EDM:
         #     r_noisy = (c_in * x_noisy)
         #     where c_in = 1 / sqrt(sigma_data^2 + sigma^2)
-        r_noisy = (
-            x_noisy
-            / torch.sqrt(self.sigma_data**2 + t_hat_noise_level**2)[..., None, None]
-        )
+        if c_in is not None:
+            r_noisy = x_noisy * c_in
+        else:
+            r_noisy = (
+                x_noisy
+                / torch.sqrt(self.sigma_data**2 + t_hat_noise_level**2)[..., None, None]
+            )
 
         # Compute the update given r_noisy (the scaled x_noisy)
         # As in EDM:
@@ -558,12 +566,16 @@ class DiffusionModule(nn.Module):
         #     c_skip = 1 / (1 + s_ratio^2)
         #     c_out = sigma / sqrt(1 + s_ratio^2)
 
-        s_ratio = (t_hat_noise_level / self.sigma_data)[..., None, None].to(
-            r_update.dtype
-        )
-        x_denoised = (
-            1 / (1 + s_ratio**2) * x_noisy
-            + t_hat_noise_level[..., None, None] / torch.sqrt(1 + s_ratio**2) * r_update
-        ).to(r_update.dtype)
+        if c_skip is not None and c_out is not None:
+            x_denoised = c_skip * x_noisy + c_out * r_update
+            return x_denoised
+        else:
+            s_ratio = (t_hat_noise_level / self.sigma_data)[..., None, None].to(
+                r_update.dtype
+            )
+            x_denoised = (
+                1 / (1 + s_ratio**2) * x_noisy
+                + t_hat_noise_level[..., None, None] / torch.sqrt(1 + s_ratio**2) * r_update
+            ).to(r_update.dtype)
 
         return x_denoised

@@ -121,13 +121,13 @@ default_weighted_pdb_configs = {
     },
 }
 
-DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/vepfs-mlp2/mlp-public/shikunfeng/Datas/Proteinix")
+DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/home/dataset-assist-0/tmp/zsl/zsl/Protenix/release_data")
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md
-CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "components.cif")
+CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "ccd_cache","components.cif")
 CCD_COMPONENTS_RDKIT_MOL_FILE_PATH = os.path.join(
-    DATA_ROOT_DIR, "components.cif.rdkit_mol.pkl"
+    DATA_ROOT_DIR,"ccd_cache","components.cif.rdkit_mol.pkl"
 )
 PDB_CLUSTER_FILE_PATH = os.path.join(DATA_ROOT_DIR, "clusters-by-entity-40.txt")
 
@@ -180,9 +180,10 @@ if (
 data_configs = {
     "num_dl_workers": 16,
     "epoch_size": 10000,
+    "batch_size": 1,
     "train_ref_pos_augment": True,
     "test_ref_pos_augment": True,
-    "train_sets": ListValue(["weightedPDB_before2109_wopb_nometalc_0925"]),
+    "train_sets": ListValue(["qbiolip_nonredund"]), # 原本的"weightedPDB_before2109_wopb_nometalc_0925",
     "train_sampler": {
         "train_sample_weights": ListValue([1.0]),
         "sampler_type": "weighted",
@@ -214,6 +215,48 @@ data_configs = {
             "indices_fpath": os.path.join(
                 DATA_ROOT_DIR,
                 "indices/1w_prot_lig_non_bonded_sampled_data.csv.gz",
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "qbiolip_nonredund": {
+        "base_info": {
+            "mmcif_dir": "/home/dataset-assist-0/tmp/zsl/zsl/Protenix/biolip/nonredund_pl/all_data/mmcif",
+            "bioassembly_dict_dir": "/home/dataset-assist-0/tmp/zsl/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
+            "indices_fpath": "/home/dataset-assist-0/tmp/zsl/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/indices_PL_only.csv",
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,
+            "use_reference_chains_only": True, 
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+        # 覆盖
+        "cropping_configs": {
+            # [ContiguousCropping, SpatialCropping, SpatialInterfaceCropping]
+            "method_weights": ListValue([0.0, 0.2, 0.8]),
+            "crop_size": 512,
+        },
+        
+    },
+    "nuc_related_indices": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR,
+                "indices/nuc_related_indices.csv.gz",
             ),
             "pdb_list": "",
             "random_sample_if_failed": True,
@@ -262,8 +305,130 @@ data_configs = {
         },
         **deepcopy(default_test_configs),
     },
+    # v1
+    "pdbbind_prot_ligand_v1": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_train.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex.csv"
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+            # "pdb_list": os.path.join(
+            #     DATA_ROOT_DIR,
+            #     "indices/pdbbind_index.txt",
+            # ),
+            # "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+            # "sort_by_n_token": False,
+            # "group_by_pdb_id": True,
+            # "find_eval_chain_interface": True,
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "pdbbind_prot_ligand": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.train.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex.csv"
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+            # "pdb_list": os.path.join(
+            #     DATA_ROOT_DIR,
+            #     "indices/pdbbind_index.txt",
+            # ),
+            # "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+            # "sort_by_n_token": False,
+            # "group_by_pdb_id": True,
+            # "find_eval_chain_interface": True,
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    # v1
+    "pdbbind_test_v1": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": 
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protien_ligand_pdbbind_test_multichain.csv",
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_test.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex_200.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    "pbbind_test_v2": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/pdbbind_tmp"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": 
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/protein_ligand_filter.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protien_ligand_pdbbind_test_multichain.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_test.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex_200.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    # v3
+    "pdbbind_test": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v2_data/pdbbind",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+            ),
+            "indices_fpath": 
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.test.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
     "msa": {
-        "enable": True,
+        "enable": False,
         "enable_rna_msa": False,
         "prot": {
             "pairing_db": "uniref100",

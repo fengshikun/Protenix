@@ -16,9 +16,72 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 from protenix.model import sample_confidence
 
+
+def kabsch(P, Q):
+    """最标准的 Kabsch 算法，返回旋转矩阵 R 和平移 t"""
+    P_cent = P - P.mean(axis=0, keepdims=True)
+    Q_cent = Q - Q.mean(axis=0, keepdims=True)
+
+    H = P_cent.T @ Q_cent
+    U, S, Vt = np.linalg.svd(H)
+
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:  # reflection fix
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+
+    t = Q.mean(axis=0) - P.mean(axis=0) @ R
+    return R, t
+
+
+def kabsch_numpy(P, Q, mask=None):
+    """
+    Computes the optimal rotation and translation to align two sets of points (P -> Q),
+    and their RMSD.
+
+    :param P: A Nx3 matrix of points
+    :param Q: A Nx3 matrix of points
+    :return: A tuple containing the optimal rotation matrix, the optimal
+             translation vector, and the RMSD.
+    """
+    assert P.shape == Q.shape, "Matrix dimensions must match"
+
+    # Compute centroids
+    centroid_P = np.mean(P, axis=0)
+    centroid_Q = np.mean(Q, axis=0)
+
+    # Optimal translation
+    t = centroid_Q - centroid_P
+
+    # Center the points
+    p = P - centroid_P
+    q = Q - centroid_Q
+
+    # Compute the covariance matrix
+    H = np.dot(p.T, q)
+
+    # SVD
+    U, S, Vt = np.linalg.svd(H)
+
+    # Validate right-handed coordinate system
+    if np.linalg.det(np.dot(Vt.T, U.T)) < 0.0:
+        Vt[-1, :] *= -1.0
+
+    # Optimal rotation
+    R = np.dot(Vt.T, U.T)
+
+    # RMSD
+    if mask is not None:
+        p = p[mask]
+        q = q[mask]
+    
+    rmsd = np.sqrt(np.sum(np.square(np.dot(p, R.T) - q)) / P.shape[0])
+
+    return R, t, rmsd
 
 def get_complex_level_rankers(scores, keys):
     assert all([k in ["plddt", "gpde", "ranking_score"] for k in keys])
@@ -90,6 +153,44 @@ class LDDTMetrics(nn.Module):
         out["complex"] = lddt
 
         return out
+    
+    def compute_ligand_rmsd_with_kabsch(self, gt, preds, lig_mask):
+        """
+        gt:    (N, 3) ground truth complex coords
+        preds: (M, N, 3) predicted complex coords
+        lig_mask: (n') ligand atom indices
+        """
+
+        M, N, _ = preds.shape
+        ligand_rmsds2 = np.zeros(M)
+        ligand_rmsds = np.zeros(M)
+
+        for i in range(M):
+            pred = preds[i]  # (N, 3)
+            R, t, ligand_rmsd = kabsch_numpy(pred, gt, mask=lig_mask)
+            ligand_rmsds[i] = ligand_rmsd
+
+            # ---------- Step 1: Kabsch align whole complex ----------
+            R, t = kabsch(pred, gt)
+            aligned_pred = pred @ R + t  # shape (N, 3)
+
+            # ---------- Step 2: extract ligand after alignment ----------
+            aligned_lig = aligned_pred[lig_mask]     # (n', 3)
+            gt_lig = gt[lig_mask]                    # (n', 3)
+            
+            pred_lig = pred[lig_mask]
+
+            # ---------- Step 3: ligand RMSD ----------
+            diff = aligned_lig - gt_lig
+            ligand_rmsds2[i] = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
+
+        # # ---------- summary ----------
+        # ratio_lt_2A = np.mean(ligand_rmsds < 2.0)
+        # ratio_lt_5A = np.mean(ligand_rmsds < 5.0)
+
+        return {
+            "ligand_rmsds": ligand_rmsds,      
+        }
 
     def aggregate(
         self,
