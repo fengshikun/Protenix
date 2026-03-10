@@ -32,6 +32,7 @@ class InputFeatureEmbedder(nn.Module):
         c_atom: int = 128,
         c_atompair: int = 16,
         c_token: int = 384,
+        use_apo_pos: bool = False,
         esm_configs: dict = {},
     ) -> None:
         """
@@ -49,6 +50,7 @@ class InputFeatureEmbedder(nn.Module):
             c_atompair=c_atompair,
             c_token=c_token,
             has_coords=False,
+            use_apo_pos=use_apo_pos,
         )
 
         self.esm_configs = {

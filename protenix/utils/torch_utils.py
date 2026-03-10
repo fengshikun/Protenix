@@ -34,16 +34,33 @@ def grad_norm(params):
 
 def to_device(obj, device):
     """Move tensor or dict of tensors to device"""
+    if obj is None:
+        return obj
+    if isinstance(obj, (int, float, bool, str, bytes)):
+        return obj
+    if isinstance(obj, np.generic):
+        return obj.item()
+
     if isinstance(obj, dict):
         for k, v in obj.items():
             if isinstance(v, dict):
                 to_device(v, device)
+            elif isinstance(v, list):
+                obj[k] = [to_device(item, device) for item in v]
+            elif isinstance(v, tuple):
+                obj[k] = tuple(to_device(item, device) for item in v)
             elif isinstance(v, torch.Tensor):
                 obj[k] = obj[k].to(device)
+            else:
+                obj[k] = v
+    elif isinstance(obj, list):
+        obj = [to_device(item, device) for item in obj]
+    elif isinstance(obj, tuple):
+        obj = tuple(to_device(item, device) for item in obj)
     elif isinstance(obj, torch.Tensor):
         obj = obj.to(device)
     else:
-        raise Exception(f"type {type(obj)} not supported")
+        return obj
     return obj
 
 

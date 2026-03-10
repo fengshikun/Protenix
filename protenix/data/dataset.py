@@ -43,6 +43,8 @@ from protenix.utils.cropping import CropData
 from protenix.utils.file_io import read_indices_csv
 from protenix.utils.logger import get_logger
 from protenix.utils.torch_utils import dict_to_tensor
+from scipy.spatial.transform import Rotation
+
 
 logger = get_logger(__name__)
 
@@ -124,6 +126,7 @@ class BaseSingleDataset(Dataset):
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
         
+        self.use_apo_pos = kwargs.get("use_apo_pos", False)
         
         # protein encoder: esm
         esm_info = kwargs.get("esm_config", {})
@@ -336,21 +339,23 @@ class BaseSingleDataset(Dataset):
         """
         # Try at most 10 times
         for _ in range(50):
-            try:
-                # idx = 2332
-                data = self.process_one(idx)
-                return data
-            except Exception as e:
-                error_message = f"{e} at idx {idx}:\n{traceback.format_exc()}"
-                self.save_error_data(idx, error_message)
+            data = self.process_one(idx)
+            return data
+            # try:
+            #     # idx = 2332
+            #     # data = self.process_one(idx)
+            #     # return data
+            # except Exception as e:
+            #     error_message = f"{e} at idx {idx}:\n{traceback.format_exc()}"
+            #     self.save_error_data(idx, error_message)
 
-                if self.random_sample_if_failed:
-                    logger.exception(f"[skip data {idx}] {error_message}")
-                    # Random sample an index
-                    idx = random.choice(range(len(self.indices_list)))
-                    continue
-                else:
-                    raise Exception(e)
+            #     if self.random_sample_if_failed:
+            #         logger.exception(f"[skip data {idx}] {error_message}")
+            #         # Random sample an index
+            #         idx = random.choice(range(len(self.indices_list)))
+            #         continue
+            #     else:
+            #         raise Exception(e)
         return data
 
     def _get_bioassembly_data(
@@ -472,6 +477,42 @@ class BaseSingleDataset(Dataset):
         # sample code to get the token and protein sequence correspondence
         
         
+        # rdkit coordinate
+        if 'pdbbind' in self.name:
+            rdkit_coords = bioassembly_dict['rdkit_coords']
+            apo_coords = bioassembly_dict['apo_coords']
+            rdkit_idx = np.random.randint(rdkit_coords.shape[0])
+            rdkit_coords = rdkit_coords[rdkit_idx]
+            # align to the original point
+            rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
+            rotation = Rotation.random(num=1)
+            rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
+            rot_matrix = rot_matrix.squeeze(0).numpy()
+            rdkit_coords = rdkit_coords @ rot_matrix.T
+            apo_coords = apo_coords - apo_coords.mean(axis=0)
+            complex_apo_coords = np.concatenate((apo_coords, rdkit_coords), axis=0)
+            bioassembly_dict['apo_atom_array'] = complex_apo_coords
+            
+            # ref_mask all set to 1
+            n_atoms = len(bioassembly_dict['atom_array'].ref_mask)
+            bioassembly_dict['atom_array'].ref_mask = np.ones((n_atoms,), dtype=np.int64)
+            # print('set all ref_mask to 1')
+            # fix the ligand res_id which is all 1
+            ligand_atom_array = bioassembly_dict['atom_array'][bioassembly_dict['atom_array'].is_ligand.astype(bool)]
+            res_ids = ligand_atom_array.res_id
+            unique_res_ids = np.unique(res_ids)
+            assert len(unique_res_ids) == 1
+            prot_atom_array = bioassembly_dict['atom_array'][~bioassembly_dict['atom_array'].is_ligand.astype(bool)]
+            max_prot_res_id = prot_atom_array.res_id.max()
+            org_ligand_res_id = unique_res_ids[0]
+            assert org_ligand_res_id == 1
+            new_ligand_res_id = max_prot_res_id + 1
+            bioassembly_dict['atom_array'].res_id[bioassembly_dict['atom_array'].is_ligand.astype(bool)] = new_ligand_res_id
+        # elif 'pbbind_test_v2' in self.name:
+        #     bioassembly_dict['atom_array'].ref_pos = np.zeros_like(bioassembly_dict['atom_array'].ref_pos)
+        #     bioassembly_dict['atom_array'].ref_mask[bioassembly_dict['atom_array'].is_ligand.astype(bool)] = 0
+        #     print('pbbind_test_v2 set all ligand ref_mask to 0')
+        
         token_num = len(bioassembly_dict["token_array"])
         
         esm_embeddings_dim = 1280
@@ -517,7 +558,7 @@ class BaseSingleDataset(Dataset):
                 token_centre_atom_indices
             ].chain_id
             is_ref_chain = np.isin(token_chain_id, ref_chain_ids)
-            bioassembly_dict["token_array"], bioassembly_dict["atom_array"], _, _ = (
+            bioassembly_dict["token_array"], bioassembly_dict["atom_array"], _, _,*rest = (
                 CropData.select_by_token_indices(
                     token_array=bioassembly_dict["token_array"],
                     atom_array=bioassembly_dict["atom_array"],
@@ -526,12 +567,14 @@ class BaseSingleDataset(Dataset):
             )
 
         if self.shuffle_mols:
-            bioassembly_dict["token_array"], bioassembly_dict["atom_array"] = (
+            bioassembly_dict["token_array"], bioassembly_dict["atom_array"],*rest = (
                 self._shuffle_array_based_on_mol_id(
                     token_array=bioassembly_dict["token_array"],
                     atom_array=bioassembly_dict["atom_array"],
                 )
             )
+            if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
+                print("[DEBUG] extra returns:", len(rest), "types:", [type(x) for x in rest])
 
         if self.shuffle_sym_ids:
             bioassembly_dict["atom_array"] = self._assign_random_sym_id(
@@ -554,6 +597,7 @@ class BaseSingleDataset(Dataset):
             cropped_template_features,
             reference_token_index,
             selected_indices,
+            cropped_atom_indices,
         ) = self.crop(
             sample_indice=sample_indice,
             bioassembly_dict=bioassembly_dict,
@@ -574,6 +618,11 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
+        if 'pdbbind' in self.name and self.use_apo_pos:
+            feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
+            if self.cropping_configs['crop_size'] > -1:
+                feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]
+                 
         feat['sequences'] = bioassembly_dict["sequences"] # esm embedding for all tokens
         feat['protein_entity_ids'] = protein_entity_ids
         
@@ -870,10 +919,10 @@ class BaseSingleDataset(Dataset):
             # Get entity_id of the interested ligand
             sample_indice = self._get_sample_indice(idx=idx)
             if sample_indice.mol_1_type == "ligand":
-                lig_entity_id = str(sample_indice.entity_1_id)
+                lig_entity_id = str(int(sample_indice.entity_1_id))
                 lig_chain_id = str(sample_indice.chain_1_id)
             elif sample_indice.mol_2_type == "ligand":
-                lig_entity_id = str(sample_indice.entity_2_id)
+                lig_entity_id = str(int(float(sample_indice.entity_2_id)))
                 lig_chain_id = str(sample_indice.chain_2_id)
             else:
                 raise ValueError(f"Cannot find ligand from this data point.")
@@ -1239,14 +1288,40 @@ def get_datasets(
 
     data_config = configs.data
     logger.info(f"Using train sets {data_config.train_sets}")
-    assert len(data_config.train_sets) == len(
-        data_config.train_sampler.train_sample_weights
-    )
+    # Robust handling for train sample weights:
+    # - If not provided, default to uniform weights (1.0) for each train set
+    # - If a single weight is provided, broadcast it to all train sets
+    # - Otherwise require lengths to match
+    num_train_sets = len(data_config.train_sets)
+    sampler_cfg = data_config.get("train_sampler", {})
+    # sampler_cfg may be a dict-like ConfigDict
+    try:
+        weights_cfg = sampler_cfg.get("train_sample_weights", None)
+    except Exception:
+        weights_cfg = getattr(sampler_cfg, "train_sample_weights", None)
+
+    if weights_cfg is None:
+        logger.warning(
+            "train_sample_weights not set; defaulting to 1.0 per train set"
+        )
+        train_sample_weights = [1.0] * num_train_sets
+    else:
+        train_sample_weights = list(weights_cfg)
+        if len(train_sample_weights) == 1 and num_train_sets > 1:
+            # broadcast single weight to all train sets
+            train_sample_weights = train_sample_weights * num_train_sets
+
+    if len(train_sample_weights) != num_train_sets:
+        raise ValueError(
+            f"train_sample_weights length ({len(train_sample_weights)}) does not match number of train_sets ({num_train_sets})"
+        )
     train_datasets = []
     datapoint_weights = []
     
     
     esm_config = configs.get("esm", None)
+    
+    use_apo_pos = configs.model.diffusion_module.use_apo_pos or configs.model.input_embedder.use_apo_pos
     
     for train_name in data_config.train_sets:
         config_dict = data_config[train_name].to_dict()
@@ -1258,6 +1333,7 @@ def get_datasets(
         )
         dataset_param["limits"] = data_config.get("limits", -1)
         dataset_param["esm_config"] = esm_config
+        dataset_param["use_apo_pos"] = use_apo_pos
         train_dataset = BaseSingleDataset(**dataset_param)
         # for debug:
         test_data = train_dataset[0]
@@ -1284,6 +1360,7 @@ def get_datasets(
         )
         dataset_param["esm_config"] = esm_config
         dataset_param["ref_pos_augment"] = data_config.get("test_ref_pos_augment", True)
+        dataset_param["use_apo_pos"] = use_apo_pos
         test_dataset = BaseSingleDataset(**dataset_param)
         test_datasets[test_name] = test_dataset
     return train_dataset, test_datasets

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 # pylint: disable=C0114,C0301
+import os
+
 from protenix.config.extend_types import (
     GlobalConfigValue,
     ListValue,
@@ -26,6 +28,8 @@ basic_configs = {
     "base_dir": RequiredValue(str),
     # training
     "eval_interval": RequiredValue(int),
+    "extra_eval_steps": ListValue([5]),
+    "extra_eval_interval": 500,
     "log_interval": RequiredValue(int),
     "checkpoint_interval": -1,
     "eval_first": False,  # run evaluate() before training steps
@@ -35,6 +39,7 @@ basic_configs = {
     ],  # params with substring will be finetuned with different learning rate: finetune_optim_configs["lr"]
     "eval_only": False,
     "load_checkpoint_path": "",
+    "skip_load_diffusion_module": False,
     "load_ema_checkpoint_path": "",
     "load_strict": True,
     "load_params_only": True,
@@ -55,10 +60,20 @@ basic_configs = {
     
     # distill settings:
     "distill_model_type": "",  # the model type for distillation, e.g., protenix_mini_esm_v0.5.0
+    "benchmark": {
+        "enable_lit_pcba": True,
+        "lit_pcba_root": os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "benchmark", "lit_pcba")
+        ),
+        "lit_pcba_lig_batch_size": 64,
+        "lit_pcba_require_pocket": False,
+        "lit_pcba_limit_targets": 0,
+    },
 }
 data_configs = {
     # Data
     "train_crop_size": 256,
+    "batch_size": 1,
     "test_max_n_token": -1,
     "train_lig_atom_rename": False,
     "train_shuffle_mols": False,
@@ -70,6 +85,7 @@ data_configs = {
         "enable": False,
         "model_name": "esm2-3b",
         "embedding_dim": 2560,
+        "trainable_last_n_layers": -1,
     },
 }
 optim_configs = {
@@ -154,6 +170,41 @@ model_configs = {
         "p_std": 1.5,
         "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
     },
+    "ddbm": False,
+    "ddbm_configs": {
+    #   "pred_mode": "ve",
+    #   "sigma_max": 1.0,
+    #   "sigma_min":0.0001,
+    #   "sigma_data": 0.5,
+    #   "cov_xy": 0,
+    #   "c": 1,
+    #   "weight_schedule":"bridge_karras",
+    
+      "train_sampler": "RealUniformSampler", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+      "infer_sampler": "dbim", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+    #   "infer_sampler": "dbim", # dbim, ddbm
+      
+      "lognorm_std": 1.0,
+      "lognorm_mean": 0.0,
+      
+      "pred_mode": "vp",
+      "sigma_max": 1.0,
+      "sigma_min":0.0001,
+    #   "sigma_data": 0.5,
+    #   "sigma_data_end": 0.5,
+      "sigma_data": 16.0,
+      "sigma_data_end": 16.0,
+      "cov_xy": 0,
+      "c": 1,
+      "beta_d": 2,
+      "beta_min": 0.1,
+      "weight_schedule":"bridge_karras",  
+      
+      "rho":7,
+      "churn_step_ratio": 0.33,
+      "guidance": 1,
+      "eta": 1.0,
+    },
     "inference_noise_scheduler": {
         "s_max": 160.0,
         "s_min": 4e-4,
@@ -179,6 +230,7 @@ model_configs = {
             "c_atom": GlobalConfigValue("c_atom"),
             "c_atompair": GlobalConfigValue("c_atompair"),
             "c_token": GlobalConfigValue("c_token"),
+            "use_apo_pos": False,
         },
         "relative_position_encoding": {
             "r_max": 32,
@@ -237,6 +289,8 @@ model_configs = {
             "dropout": 0.25,
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),
         },
+        
+        "only_diffusion_module_train": False,
         "diffusion_module": {
             "use_fine_grained_checkpoint": True,
             "sigma_data": GlobalConfigValue("sigma_data"),
@@ -259,6 +313,7 @@ model_configs = {
                 "n_heads": 4,
             },
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),
+            "use_apo_pos": False,
         },
         "confidence_head": {
             "c_z": GlobalConfigValue("c_z"),

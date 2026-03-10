@@ -58,16 +58,20 @@ class SymmetricPermutation(object):
         assert mini_coord.dim() == 3
 
         log_dict = {}
-        # 1. ChainPermutation: permute ground-truth chains to match mini-rollout prediction
-        permuted_label_dict, chain_perm_log_dict, _, _ = chain_permutation.run(
-            mini_coord[0],  # Only accepts a single structure
-            input_feature_dict,
-            label_full_dict,
-            permute_label=True,
-            error_dir=self.chain_error_dir,
-            **self.configs.chain_permutation.configs,
-        )
-        if self.configs.chain_permutation.train.mini_rollout:
+
+        run_chain_perm = bool(self.configs.chain_permutation.train.mini_rollout)
+        run_atom_perm = bool(self.configs.atom_permutation.train.mini_rollout)
+
+        if run_chain_perm:
+            # 1. ChainPermutation: permute ground-truth chains to match mini-rollout prediction
+            permuted_label_dict, chain_perm_log_dict, _, _ = chain_permutation.run(
+                mini_coord[0],  # Only accepts a single structure
+                input_feature_dict,
+                label_full_dict,
+                permute_label=True,
+                error_dir=self.chain_error_dir,
+                **self.configs.chain_permutation.configs,
+            )
             label_dict.update(permuted_label_dict)
             log_dict.update(
                 {
@@ -76,39 +80,26 @@ class SymmetricPermutation(object):
                 }
             )
         else:
-            # Log only, not update the label_dict
-            log_dict.update(
-                {
-                    f"minirollout_perm/Chain.F-{k}": v
-                    for k, v in chain_perm_log_dict.items()
-                }
+            log_dict.update({"minirollout_perm/Chain": 0.0})
+
+        if run_atom_perm:
+            # 2. AtomPermutation: permute ground-truth atoms to match mini-rollout prediction
+            permuted_label_dict, atom_perm_log_dict, _ = atom_permutation.run(
+                pred_coord=mini_coord[0],
+                true_coord=label_dict["coordinate"],
+                true_coord_mask=label_dict["coordinate_mask"],
+                ref_space_uid=input_feature_dict["ref_space_uid"],
+                atom_perm_list=input_feature_dict["atom_perm_list"],
+                permute_label=True,
+                error_dir=self.atom_error_dir,
+                global_align_wo_symmetric_atom=self.configs.atom_permutation.global_align_wo_symmetric_atom,
             )
-
-        # 2. AtomPermutation: permute ground-truth atoms to match mini-rollout prediction
-        permuted_label_dict, atom_perm_log_dict, _ = atom_permutation.run(
-            pred_coord=mini_coord[0],
-            true_coord=label_dict["coordinate"],
-            true_coord_mask=label_dict["coordinate_mask"],
-            ref_space_uid=input_feature_dict["ref_space_uid"],
-            atom_perm_list=input_feature_dict["atom_perm_list"],
-            permute_label=True,
-            error_dir=self.atom_error_dir,
-            global_align_wo_symmetric_atom=self.configs.atom_permutation.global_align_wo_symmetric_atom,
-        )
-
-        if self.configs.atom_permutation.train.mini_rollout:
             label_dict.update(permuted_label_dict)
             log_dict.update(
                 {f"minirollout_perm/Atom-{k}": v for k, v in atom_perm_log_dict.items()}
             )
         else:
-            # Log only, not update the label_dict
-            log_dict.update(
-                {
-                    f"minirollout_perm/Atom.F-{k}": v
-                    for k, v in atom_perm_log_dict.items()
-                }
-            )
+            log_dict.update({"minirollout_perm/Atom": 0.0})
 
         return label_dict, log_dict
 

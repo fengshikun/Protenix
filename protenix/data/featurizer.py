@@ -595,24 +595,55 @@ class Featurizer(object):
 
             # Get primary chain (protein backone in 10 Angstrom radius)
             primary_chain_candidates = near_atoms & prot_backbone
-            primary_chain_candidates_atoms = atom_array[primary_chain_candidates]
+            
+            if not np.any(primary_chain_candidates):
+                # 对每条 protein chain，计算 backbone atoms 到 ligand 的最小距离
+                min_dist = np.inf
+                primary_chain_asym_id_int = None
 
-            max_atom = 0
-            primary_chain_asym_id_int = None
-            for asym_id_int in np.unique(primary_chain_candidates_atoms.asym_id_int):
-                n_atoms = np.sum(
-                    primary_chain_candidates_atoms.asym_id_int == asym_id_int
+                for asym_id_int in np.unique(atom_array.asym_id_int[prot_backbone]):
+                    chain_mask = prot_backbone & (atom_array.asym_id_int == asym_id_int)
+                    if not np.any(chain_mask):
+                        continue
+
+                    chain_pos = atom_array.coord[chain_mask]  # (N, 3)
+
+                    # ligand atoms 到该 chain backbone 的最小距离
+                    dists = np.linalg.norm(
+                        chain_pos[:, None, :] - lig_pos[None, :, :],
+                        axis=-1
+                    )
+                    chain_min_dist = dists.min()
+
+                    if chain_min_dist < min_dist:
+                        min_dist = chain_min_dist
+                        primary_chain_asym_id_int = asym_id_int
+
+                assert primary_chain_asym_id_int is not None, \
+                    f"No protein chain found for ligand ({lig_label_asym_id=})."
+
+                pocket_mask = prot_backbone & (
+                    atom_array.asym_id_int == primary_chain_asym_id_int
                 )
-                if n_atoms > max_atom:
-                    max_atom = n_atoms
-                    primary_chain_asym_id_int = asym_id_int
-            assert (
-                primary_chain_asym_id_int is not None
-            ), f"No primary chain found for ligand ({lig_label_asym_id=})."
+            else:
+                primary_chain_candidates_atoms = atom_array[primary_chain_candidates]
 
-            pocket_mask = primary_chain_candidates & (
-                atom_array.asym_id_int == primary_chain_asym_id_int
-            )
+                max_atom = 0
+                primary_chain_asym_id_int = None
+                for asym_id_int in np.unique(primary_chain_candidates_atoms.asym_id_int):
+                    n_atoms = np.sum(
+                        primary_chain_candidates_atoms.asym_id_int == asym_id_int
+                    )
+                    if n_atoms > max_atom:
+                        max_atom = n_atoms
+                        primary_chain_asym_id_int = asym_id_int
+                assert (
+                    primary_chain_asym_id_int is not None
+                ), f"No primary chain found for ligand ({lig_label_asym_id=})."
+
+                pocket_mask = primary_chain_candidates & (
+                    atom_array.asym_id_int == primary_chain_asym_id_int
+                )
             ligand_mask_list.append(ligand_mask)
             pocket_mask_list.append(pocket_mask)
 

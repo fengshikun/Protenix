@@ -1,0 +1,15 @@
+rec_root	/home/dataset-local/tmp/zsl/Protenix/biolip/Q_biolip/qbiolip_PL_nonredund_mmcif/nonredund_rec_cif
+lig_root	/home/dataset-local/tmp/zsl/Protenix/biolip/Q_biolip/qbiolip_PL_nonredund_mmcif/nonredund_lig_cif
+out_root	/home/dataset-local/tmp/zsl/Protenix/biolip/Q_biolip/qbiolip_PL_nonredund_mmcif/mmcif_output
+receptor_cif_count	46370
+ligand_tasks	146020
+success	137859
+skipped_by_filters	8145
+failed	16
+normalize_atoms	True
+has_protenix_RES_ATOMS_DICT	True
+min_lig_heavy_atoms	5
+max_lig_heavy_atoms	120
+keep_only_small_molecule	True
+require_smiles_in_ligand_json	False
+exclude_ligids_count	48

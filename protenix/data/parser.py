@@ -30,6 +30,10 @@ from biotite.structure import AtomArray, get_chain_starts, get_residue_starts
 from biotite.structure.io.pdbx import convert as pdbx_convert
 from biotite.structure.molecules import get_molecule_indices
 
+from Bio.PDB import PDBParser
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
 from protenix.data import ccd
 from protenix.data.ccd import get_ccd_ref_info
 from protenix.data.constants import (
@@ -51,6 +55,60 @@ from protenix.data.utils import (
     get_starts_by,
     parse_pdb_cluster_file_to_dict,
 )
+
+from biotite.structure.bonds import BondType
+from rdkit import Chem
+
+RDKitBond2Biotite = {
+    Chem.rdchem.BondType.SINGLE: BondType.SINGLE,
+    Chem.rdchem.BondType.DOUBLE: BondType.DOUBLE,
+    Chem.rdchem.BondType.TRIPLE: BondType.TRIPLE,
+    Chem.rdchem.BondType.AROMATIC: BondType.AROMATIC,
+}
+
+
+def rdkit_bond_to_biotite(bond: Chem.Bond) -> BondType:
+    """
+    Map RDKit bond to biotite BondType.
+    """
+    if bond is None:
+        return BondType.ANY
+
+    rdkit_type = bond.GetBondType()
+    is_aromatic = bond.GetIsAromatic()
+
+    # Coordination / dative bonds
+    if rdkit_type in (
+        Chem.BondType.DATIVE,
+        Chem.BondType.DATIVEONE,
+        Chem.BondType.DATIVEL,
+        Chem.BondType.DATIVER,
+    ):
+        return BondType.COORDINATION
+
+    # Aromatic bonds
+    if is_aromatic:
+        if rdkit_type == Chem.BondType.SINGLE:
+            return BondType.AROMATIC_SINGLE
+        elif rdkit_type == Chem.BondType.DOUBLE:
+            return BondType.AROMATIC_DOUBLE
+        elif rdkit_type == Chem.BondType.TRIPLE:
+            return BondType.AROMATIC_TRIPLE
+        else:
+            return BondType.AROMATIC
+
+    # Non-aromatic bonds
+    if rdkit_type == Chem.BondType.SINGLE:
+        return BondType.SINGLE
+    elif rdkit_type == Chem.BondType.DOUBLE:
+        return BondType.DOUBLE
+    elif rdkit_type == Chem.BondType.TRIPLE:
+        return BondType.TRIPLE
+    elif rdkit_type == Chem.BondType.QUADRUPLE:
+        return BondType.QUADRUPLE
+
+    return BondType.ANY
+
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +177,16 @@ class MMCIFParser:
             int: The total number of polymer chains in the specified assembly.
                  If the oligomeric count is invalid (e.g., '?'), the function returns None.
         """
+        
+        block = self.cif.block
+
+        # If this CIF has no assembly table → return None (or 0)
+        if "pdbx_struct_assembly" not in block:
+            # Option A: Return None to indicate "no biological assembly info"
+            return None  
+            # Option B (if your pipeline wants default 1): return 1  
+            # Option C (if you want 0): return 0
+        
         chain_count = 0
         for _assembly_id, _chain_count in zip(
             self.cif.block["pdbx_struct_assembly"]["id"].as_array(),
@@ -665,6 +733,7 @@ class MMCIFParser:
             core_indices = None
         return core_indices
 
+    
     def get_bioassembly(
         self,
         assembly_id: str = "1",
@@ -723,9 +792,9 @@ class MMCIFParser:
                 aa, self.entity_poly_type
             ),
             # Note: Filter.remove_polymer_chains_too_short not being used
-            lambda aa: Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away(
-                aa, self.entity_poly_type
-            ),
+            # lambda aa: Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away(
+            #     aa, self.entity_poly_type
+            # ),
             self.fix_arginine,
             self.add_missing_atoms_and_residues,  # and add annotation is_resolved (False for missing atoms)
             Filter.remove_element_X,  # remove X element (including ASX->ASP, GLX->GLU) after add_missing_atoms_and_residues()
@@ -831,6 +900,301 @@ class MMCIFParser:
                 ]
             )
         )
+        bioassembly_dict["num_prot_chains"] = num_prot_chains
+
+        bioassembly_dict["atom_array"] = atom_array
+        bioassembly_dict["num_tokens"] = atom_array.centre_atom_mask.sum()
+        return bioassembly_dict
+    
+    
+    def get_bioassembly2(
+        self,
+        assembly_id: str = "1",
+        max_assembly_chains: int = 1000,
+        parser2 = None,
+        pdb_id = pdb_id,
+    ) -> dict[str, Any]:
+        """
+        Build the given biological assembly.
+
+        Args:
+            assembly_id (str, optional): Assembly ID. Defaults to "1".
+            max_assembly_chains (int, optional): Max allowed chains in the assembly. Defaults to 1000.
+
+        Returns:
+            dict[str, Any]: A dictionary containing basic Bioassembly information, including:
+                - "pdb_id": The PDB ID.
+                - "sequences": The sequences associated with the assembly.
+                - "release_date": The release date of the structure.
+                - "assembly_id": The assembly ID.
+                - "num_assembly_polymer_chains": The number of polymer chains in the assembly.
+                - "num_prot_chains": The number of protein chains in the assembly.
+                - "entity_poly_type": The type of polymer entities.
+                - "resolution": The resolution of the structure. Set to -1.0 if resolution not found.
+                - "atom_array": The AtomArray object representing the structure.
+                - "num_tokens": The number of tokens in the AtomArray.
+        """
+        num_assembly_polymer_chains = self.num_assembly_polymer_chains(assembly_id)
+        # num_assembly_polymer_chains = 2
+        bioassembly_dict = {
+            "pdb_id": pdb_id,
+            "sequences": self.get_sequences(),  # label_entity_id --> canonical_sequence
+            "release_date": self.release_date,
+            "assembly_id": assembly_id,
+            "num_assembly_polymer_chains": num_assembly_polymer_chains,
+            "num_prot_chains": -1,
+            "entity_poly_type": self.entity_poly_type,
+            "resolution": self.resolution,
+            "atom_array": None,
+        }
+        if (not num_assembly_polymer_chains) or (
+            num_assembly_polymer_chains > max_assembly_chains
+        ):
+            return bioassembly_dict
+
+
+        # rdkit_mol_path = self.cif.block["my_category"]["rdkit_ligand"].as_array()[0]
+        # protein_path = self.cif.block["my_category"]["apo_protein"].as_array()[0]
+        
+        path1 = self.cif.block["my_category"]["apo_protein"].as_array()[0]
+        path2 = self.cif.block["my_category"]["rdkit_ligand"].as_array()[0]
+        if path1.endswith(".pdb"):
+            protein_path = path1
+            rdkit_mol_path = path2
+        else:
+            protein_path = path2
+            rdkit_mol_path = path1
+
+        # created AtomArray of first model from mmcif atom_site (Asymmetric Unit)
+        atom_array = self.get_structure()
+
+        atom_array2= parser2.get_structure()
+        
+        # read the apo structure from pdb file
+        
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("protein", protein_path)
+        
+        coords = []
+
+        for atom in structure.get_atoms():
+            coords.append(atom.get_coord())   # numpy array (x,y,z)
+        
+        
+        # read the sdf
+        # rdkit_mol_path = "/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected/6ibz/6ibz_ligand.sdf"
+        suppl = Chem.SDMolSupplier(rdkit_mol_path, removeHs=False, sanitize=True)
+        mols = [m for m in suppl]
+        mol = mols[0]
+        Chem.Kekulize(mol, clearAromaticFlags=False)
+        # mol = Chem.RemoveHs(mol)
+        atoms = mol.GetAtoms()
+        
+        mask = atom_array.res_name == 'UNL'
+        if len(atoms) != mask.sum():
+            print(f"Warning: ligand atom number not match: {len(atoms)} != {mask.sum()}")
+            # load the org mol2 file
+            org_mol2_path = rdkit_mol_path.replace("_rdkit.sdf", ".mol2")
+            mol2_suppl = Chem.MolFromMol2File(org_mol2_path, removeHs=False, sanitize=True)
+            Chem.Kekulize(mol2_suppl, clearAromaticFlags=False)
+            mol = mol2_suppl
+            mols = [mol]
+            atoms = mol.GetAtoms()
+            
+        assert len(atoms) == mask.sum()
+        indices = np.where(mask)[0]  # np.where返回元组，[0]取一维索引
+
+        bond_list = atom_array.bonds
+        aa_list = []
+        for bond in mol.GetBonds():
+            i = indices[bond.GetBeginAtomIdx()]
+            j = indices[bond.GetEndAtomIdx()]
+
+            
+            # bond_type = RDKitBond2Biotite.get(
+            #     bond.GetBondType(),
+            #     BondType.SINGLE,  # fallback
+            # )
+            
+            biotite_type = rdkit_bond_to_biotite(bond)
+            aa_list.append((i, j, biotite_type))
+
+            bond_list.add_bond(i, j, biotite_type)
+        
+        
+        # get all atom non-h idx
+        non_h_atom_indices = [atom.GetIdx() for atom in atoms if atom.GetSymbol() != "H"]
+        non_h_elements = [atom.GetSymbol() for atom in atoms if atom.GetSymbol() != "H"]
+
+        num_confs = len(mols)
+        # print("Conformers:", num_confs)
+
+        # 用一个 list 存储每个构象的坐标
+        ligand_coords = []
+
+        for conf_id in range(num_confs):
+            conf = mols[conf_id].GetConformer()
+            
+            coords_tmp = []
+            for idx in non_h_atom_indices:
+                pos = conf.GetAtomPosition(idx)
+                coords_tmp.append([pos.x, pos.y, pos.z])
+            
+            coords_tmp = np.array(coords_tmp)
+            ligand_coords.append(coords_tmp)
+
+        # 转成 numpy array，shape = [num_confs, num_atoms_without_H, 3]
+        ligand_coords = np.stack(ligand_coords, axis=0)
+        
+        
+        
+        # convert MSE to MET to consistent with MMCIFParser.get_poly_res_names()
+        atom_array = self.mse_to_met(atom_array)
+
+        
+        
+        # update sequences: keep same altloc residue with atom_array
+        bioassembly_dict["sequences"] = self.get_sequences(atom_array)
+
+        pipeline_functions = [
+            Filter.remove_water,
+            Filter.remove_hydrogens,
+            lambda aa: Filter.remove_polymer_chains_all_residues_unknown(
+                aa, self.entity_poly_type
+            ),
+            # Note: Filter.remove_polymer_chains_too_short not being used
+            lambda aa: Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away(
+                aa, self.entity_poly_type
+            ),
+            self.fix_arginine,
+            self.add_missing_atoms_and_residues,  # and add annotation is_resolved (False for missing atoms)
+            Filter.remove_element_X,  # remove X element (including ASX->ASP, GLX->GLU) after add_missing_atoms_and_residues()
+        ]
+
+        if set(self.methods) & CRYSTALLIZATION_METHODS:
+            # AF3 SI 2.5.4 Crystallization aids are removed if the mmCIF method information indicates that crystallography was used.
+            pipeline_functions.append(
+                lambda aa: Filter.remove_crystallization_aids(aa, self.entity_poly_type)
+            )
+
+
+        pipeline_functions = [
+            Filter.remove_hydrogens,
+            self.add_missing_atoms_and_residues,
+        ] # debug
+
+        for func in pipeline_functions:
+            atom_array = func(atom_array)
+            atom_array2 = func(atom_array2)
+            if len(atom_array) == 0:
+                # no atoms left
+                return bioassembly_dict
+        
+        apo_protein_coords = atom_array2[atom_array2.res_name!='UNL'].coord
+
+        assert len(apo_protein_coords) + ligand_coords.shape[1] == len(atom_array), f"length not match: {len(apo_protein_coords)} + {ligand_coords.shape[1]} != {len(atom_array)}"
+        atom_array_checkpoints_len1 = len(atom_array)
+        
+        atom_array = AddAtomArrayAnnot.add_token_mol_type(
+            atom_array, self.entity_poly_type
+        )
+        atom_array = AddAtomArrayAnnot.add_centre_atom_mask(atom_array)
+        atom_array = AddAtomArrayAnnot.add_atom_mol_type_mask(atom_array)
+        atom_array = AddAtomArrayAnnot.add_distogram_rep_atom_mask(atom_array)
+        atom_array = AddAtomArrayAnnot.add_plddt_m_rep_atom_mask(atom_array)
+        atom_array = AddAtomArrayAnnot.add_cano_seq_resname(atom_array)
+        atom_array = AddAtomArrayAnnot.add_tokatom_idx(atom_array)
+        atom_array = AddAtomArrayAnnot.add_modified_res_mask(atom_array)
+        assert (
+            atom_array.centre_atom_mask.sum()
+            == atom_array.distogram_rep_atom_mask.sum()
+        )
+
+        # expand created AtomArray by expand bioassembly
+        atom_array = self.expand_assembly(atom_array, assembly_id)
+
+        if len(atom_array) == 0:
+            # If no chains corresponding to the assembly_id remain in the AtomArray
+            # expand_assembly will return an empty AtomArray.
+            return bioassembly_dict
+
+        # reset the coords after expand assembly
+        # atom_array.coord[~atom_array.is_resolved, :] = 0.0
+
+        # rename chain_ids from A A B to A0 A1 B0 and add asym_id_int, entity_id_int, sym_id_int
+        atom_array = AddAtomArrayAnnot.unique_chain_and_add_ids(atom_array)
+
+        # get chain id before remove chains
+        core_indices = self._get_core_indices(atom_array)
+        if core_indices is not None:
+            ori_chain_ids = np.unique(atom_array.chain_id[core_indices])
+        else:
+            ori_chain_ids = np.unique(atom_array.chain_id)
+
+        atom_array = AddAtomArrayAnnot.add_mol_id(atom_array)
+        # atom_array = Filter.remove_unresolved_mols(atom_array)
+
+        # update core indices after remove unresolved mols
+        core_indices = np.where(np.isin(atom_array.chain_id, ori_chain_ids))[0]
+
+        # If the number of chains has already reached `max_chains_num`, but the token count hasn't reached `max_tokens_num`,
+        # chains will continue to be added until `max_tokens_num` is exceeded.
+        # atom_array, _input_chains_num = Filter.too_many_chains_filter(
+        #     atom_array,
+        #     core_indices=core_indices,
+        #     max_chains_num=20,
+        #     max_tokens_num=5120,
+        # )
+
+        # if atom_array is None:
+        #     # The distance between the central atoms in any two chains is greater than 15 angstroms.
+        #     return bioassembly_dict
+
+        # # update core indices after too_many_chains_filter
+        # core_indices = np.where(np.isin(atom_array.chain_id, ori_chain_ids))[0]
+
+        # atom_array, _removed_chain_ids = Filter.remove_clashing_chains(
+        #     atom_array, core_indices=core_indices
+        # )
+
+        # # remove asymmetric polymer ligand bonds (including protein-protein bond, like disulfide bond)
+        # # apply to assembly atom array
+        # atom_array = Filter.remove_asymmetric_polymer_ligand_bonds(
+        #     atom_array, self.entity_poly_type
+        # )
+
+        # # add_mol_id before applying the two filters below to ensure that covalent components are not removed as individual chains.
+        atom_array = AddAtomArrayAnnot.find_equiv_mol_and_assign_ids(
+            atom_array, self.entity_poly_type
+        )
+
+        # numerical encoding of (chain id, residue index)
+        atom_array = AddAtomArrayAnnot.add_ref_space_uid(atom_array)
+        atom_array = AddAtomArrayAnnot.add_ref_info_and_res_perm(atom_array)
+
+        # give the reference coords from the rdkit ligand and protein pdb
+        ligand_num = ligand_coords.shape[1]
+        atom_array.ref_pos[-ligand_num:, :] = ligand_coords[0, :, :]
+        
+        # the number of protein chains in the assembly
+        prot_label_entity_ids = [
+            k for k, v in self.entity_poly_type.items() if "polypeptide" in v
+        ]
+        num_prot_chains = len(
+            np.unique(
+                atom_array.chain_id[
+                    np.isin(atom_array.label_entity_id, prot_label_entity_ids)
+                ]
+            )
+        )
+        
+        atom_array_checkpoints_len2 = len(atom_array)
+        assert atom_array_checkpoints_len1 == atom_array_checkpoints_len2, f"length changed after add_ref_space_uid and add_ref_info_and_res_perm: {atom_array_checkpoints_len1} != {atom_array_checkpoints_len2}"
+        
+        # ligand coords and protein_apo coords
+        bioassembly_dict['rdkit_coords'] =  ligand_coords
+        bioassembly_dict['apo_coords'] =  apo_protein_coords
+        
         bioassembly_dict["num_prot_chains"] = num_prot_chains
 
         bioassembly_dict["atom_array"] = atom_array
