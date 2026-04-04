@@ -589,15 +589,27 @@ class AF3Trainer(object):
     @torch.no_grad()
     def evaluate(self, mode: str = "eval"):
         if not self.configs.eval_ema_only:
-            self._evaluate()
+            self._evaluate(only_save_af3=False)
         # if hasattr(self, "ema_wrapper"):
         #     self.ema_wrapper.apply_shadow()
         #     self._evaluate(ema_suffix=f"ema{self.ema_wrapper.decay}_", mode=mode)
         #     self.ema_wrapper.restore()
 
     @torch.no_grad()
-    def _evaluate(self, ema_suffix: str = "", mode: str = "eval"):
+    def _evaluate(self, ema_suffix: str = "", mode: str = "eval", only_save_af3: bool = False):
         # Init Metric Aggregator
+        
+        if only_save_af3:
+            for test_name, test_dl in self.test_dls.items():
+                dataset = test_dl.dataset
+                for i in tqdm(range(len(dataset))):
+                    try:
+                        _ = dataset[i]
+                    except Exception as e:
+                        print(f'{e} happens')
+            return
+        
+        
         simple_metric_wrapper = SimpleMetricAggregator(["avg"])
         eval_precision = {
             "fp32": torch.float32,
@@ -622,7 +634,8 @@ class AF3Trainer(object):
             for index, batch in enumerate(tqdm(test_dl)):
                 batch = to_device(batch, self.device)
                 pid = batch["basic"]["pdb_id"]
-
+                    
+                    
                 if index + 1 == total_batch_num and DIST_WRAPPER.world_size > 1:
                     # Gather all pids across ranks for avoiding duplicated evaluations when drop_last = False
                     all_data_ids = DIST_WRAPPER.all_gather_object(evaluated_pids)

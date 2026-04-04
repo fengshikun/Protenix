@@ -44,9 +44,412 @@ from protenix.utils.file_io import read_indices_csv
 from protenix.utils.logger import get_logger
 from protenix.utils.torch_utils import dict_to_tensor
 from scipy.spatial.transform import Rotation
+import gemmi
+from typing import Dict, List, Union, Any
+import string
 
 
 logger = get_logger(__name__)
+
+
+import json
+from collections import defaultdict
+import string
+
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+
+_STD3 = {
+    "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
+    "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL"
+}
+
+# 仅用于把三字母里识别出的“修饰/非标准残基”写到 AF3 modifications.ptmType
+# 这里不再需要 parent AA 映射，因为 sequence 直接来自 sequences_dict
+def _as_res3_list(x: Union[Sequence[str], "np.ndarray"]) -> List[str]:
+    if np is not None and isinstance(x, np.ndarray):
+        return [str(r).strip().upper() for r in x.tolist()]
+    return [str(r).strip().upper() for r in x]  # type: ignore[arg-type]
+
+
+from typing import Dict, List, Union, Any
+
+def unique_stable(arr):
+    seen = set()
+    out = []
+    for x in arr:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return np.array(out)
+
+
+def _is_weighted_apo_dataset(dataset_name: str) -> bool:
+    return dataset_name.startswith("weightedPDB_4w_prot_lig_apo")
+
+
+def _af3_chain_ids(n: int) -> List[str]:
+    """Generate chain IDs in AF3 'reverse spreadsheet style':
+    A..Z, AA, BA, CA..ZA, AB, BB..ZB, ...
+    """
+    if n <= 0:
+        return []
+    letters = list(string.ascii_uppercase)
+    ids = []
+    # 1-letter IDs
+    for c in letters:
+        ids.append(c)
+        if len(ids) == n:
+            return ids
+    # 2+ letter IDs: first vary the first char, then second char (reverse spreadsheet)
+    # AA, BA, CA, ... ZA, AB, BB, ...
+    k = 2
+    while len(ids) < n:
+        for second in letters:          # A, B, C...
+            for first in letters:       # A, B, C...
+                ids.append(first + second)
+                if len(ids) == n:
+                    return ids
+        k += 1
+        # If you ever need 3+ letters, extend similarly; most use-cases won't.
+        # Implement 3+ letters only if necessary.
+        if k > 2:
+            raise ValueError("Need >702 chain IDs; extend generator for 3+ letters.")
+    return ids
+
+def build_af3_config(
+    entity_to_seq: Dict[str, str],                      # sequences_dict: 1-letter
+    entity_to_count: Dict[str, int],
+    entity_id_seq_dict: Optional[Dict[str, Union[Sequence[str], "np.ndarray"]]] = None,  # 3-letter
+    name: str = "job_from_entities",
+    model_seeds: List[int] = None,
+    version: int = 1,
+    template_free: bool = False,
+    msa_free: bool = False,
+    print_mod_summary: bool = True,
+) -> Dict[str, Any]:
+    """
+    Build AlphaFold3 (dialect=alphafold3) JSON config for protein-only systems.
+
+    - protein.sequence 直接使用 entity_to_seq (1-letter).
+    - 若提供 entity_id_seq_dict，则用其三字母序列识别非标准残基，并写入 protein.modifications:
+        {"ptmType": "<CCD>", "ptmPosition": <1-based>}
+    """
+    if model_seeds is None or len(model_seeds) == 0:
+        model_seeds = [1]
+
+    # Validate sequences
+    for eid, seq in entity_to_seq.items():
+        if not isinstance(seq, str) or len(seq.strip()) == 0:
+            raise ValueError(f"Empty sequence for entity {eid}")
+
+    # Validate counts
+    for eid, cnt in entity_to_count.items():
+        if cnt is None:
+            continue
+        if not isinstance(cnt, int) or cnt <= 0:
+            raise ValueError(f"Invalid chain count for entity {eid}: {cnt}")
+
+    sequences_block: List[Dict[str, Any]] = []
+    total_chains = sum(entity_to_count.get(eid, 1) for eid in entity_to_seq.keys())
+    chain_ids_pool = _af3_chain_ids(total_chains)  # 复用你已有的 helper
+    cursor = 0
+
+    job_modified: List[Tuple[str, int, str]] = []  # (eid, pos, ptmType)
+
+    for eid in sorted(entity_to_seq.keys(), key=lambda x: str(x)):
+        seq1 = entity_to_seq[eid].replace(" ", "").replace("\n", "").strip()
+        cnt = entity_to_count.get(eid, 1)
+
+        ids = chain_ids_pool[cursor: cursor + cnt]
+        cursor += cnt
+        id_field: Union[str, List[str]] = ids[0] if cnt == 1 else ids
+
+        protein_obj: Dict[str, Any] = {
+            "id": id_field,
+            "sequence": seq1,
+        }
+
+        # Add modifications if 3-letter residues provided
+        if entity_id_seq_dict is not None and eid in entity_id_seq_dict and entity_id_seq_dict[eid] is not None:
+            res3_list = _as_res3_list(entity_id_seq_dict[eid])  # type: ignore[arg-type]
+            if len(res3_list) != len(seq1):
+                raise ValueError(
+                    f"Length mismatch for entity {eid}: "
+                    f"len(sequences_dict[1-letter])={len(seq1)} vs len(entity_id_seq_dict[3-letter])={len(res3_list)}"
+                )
+
+            mods: List[Dict[str, Any]] = []
+            for i0, r3 in enumerate(res3_list):
+                if r3 in _STD3:
+                    continue
+                pos = i0 + 1  # 1-based
+                mods.append({"ptmType": r3, "ptmPosition": pos})
+                job_modified.append((eid, pos, r3))
+
+            if mods:
+                protein_obj["modifications"] = mods
+
+        if template_free or msa_free:
+            protein_obj["templates"] = []
+        if msa_free:
+            protein_obj["unpairedMsa"] = ""
+            protein_obj["pairedMsa"] = ""
+
+        sequences_block.append({"protein": protein_obj})
+
+    if print_mod_summary and job_modified:
+        uniq_ptm = sorted({ptm for _, _, ptm in job_modified})
+        print(
+            f"[{name}] contains modified residues: {uniq_ptm} "
+            f"(total modified positions={len(job_modified)}). Examples: {job_modified[:10]}"
+        )
+
+    return {
+        "name": name,
+        "modelSeeds": model_seeds,
+        "sequences": sequences_block,
+        "dialect": "alphafold3",
+        "version": version,
+    }
+
+# def build_af3_config(
+#     entity_to_seq: Dict[str, str],
+#     entity_to_count: Dict[str, int],
+#     name: str = "job_from_entities",
+#     model_seeds: List[int] = None,
+#     version: int = 1,
+#     template_free: bool = False,
+#     msa_free: bool = False,
+# ) -> Dict[str, Any]:
+#     """
+#     Build AlphaFold3 (dialect=alphafold3) JSON config for protein-only systems.
+
+#     template_free=True  -> add "templates": []
+#     msa_free=True       -> set unpairedMsa="" and pairedMsa="" (and typically templates:[])
+#     """
+#     if model_seeds is None or len(model_seeds) == 0:
+#         model_seeds = [1]
+
+#     # Validate
+#     for eid, seq in entity_to_seq.items():
+#         if not isinstance(seq, str) or len(seq.strip()) == 0:
+#             raise ValueError(f"Empty sequence for entity {eid}")
+#     for eid, cnt in entity_to_count.items():
+#         if cnt is None:
+#             continue
+#         if not isinstance(cnt, int) or cnt <= 0:
+#             raise ValueError(f"Invalid chain count for entity {eid}: {cnt}")
+
+#     sequences_block = []
+#     chain_ids_pool = _af3_chain_ids(sum(entity_to_count.get(eid, 1) for eid in entity_to_seq.keys()))
+#     cursor = 0
+
+#     # Deterministic order: sort by entity_id string
+#     for eid in sorted(entity_to_seq.keys(), key=lambda x: str(x)):
+#         seq = entity_to_seq[eid].replace(" ", "").replace("\n", "").strip()
+#         cnt = entity_to_count.get(eid, 1)
+
+#         ids = chain_ids_pool[cursor: cursor + cnt]
+#         cursor += cnt
+#         id_field: Union[str, List[str]] = ids[0] if cnt == 1 else ids
+
+#         protein_obj: Dict[str, Any] = {
+#             "id": id_field,
+#             "sequence": seq,
+#         }
+#         if template_free or msa_free:
+#             protein_obj["templates"] = []
+#         if msa_free:
+#             protein_obj["unpairedMsa"] = ""
+#             protein_obj["pairedMsa"] = ""
+
+#         sequences_block.append({"protein": protein_obj})
+
+#     return {
+#         "name": name,
+#         "modelSeeds": model_seeds,
+#         "sequences": sequences_block,
+#         "dialect": "alphafold3",
+#         "version": version,
+#     }
+
+
+def build_af3_from_entity_info(entity_seq_dict, entity_chain_count):
+    """
+    仅基于:
+      - entity_seq_dict: {entity_id: sequence}
+      - entity_chain_count: {entity_id: num_chains}
+    
+    构造 AlphaFold3 multimer 输入 config
+    """
+
+    # 1. 构造 entities（序列级别）
+    entities = []
+    for ent_id, seq in entity_seq_dict.items():
+        entities.append({
+            "id": f"entity_{ent_id}",
+            "type": "protein",
+            "sequence": seq
+        })
+
+    # 2. 构造 chains（结构链级别）
+    chains = []
+    chain_letters = list(string.ascii_uppercase)  # A, B, C, ...
+    chain_counter = 0
+
+    for ent_id, n_chain in entity_chain_count.items():
+        for i in range(n_chain):
+            chain_id = chain_letters[chain_counter]
+            chains.append({
+                "chain_id": f"Chain_{chain_id}",     # 结构链ID
+                "entity_id": f"entity_{ent_id}",      # 指向同一序列实体
+                "sym_id": i                            # 对称编号
+            })
+            chain_counter += 1
+
+    # 3. AF3 输入结构
+    af3_input = {
+        "entities": entities,
+        "chains": chains,
+        "options": {
+            "model_preset": "default",
+            "use_msa": True,
+            "use_templates": False
+        }
+    }
+
+    return af3_input
+
+
+def read_mmcif_to_chain_coords(mmcif_path, atom_name_filter=None):
+    """
+    读取 mmCIF 文件
+    返回:
+      {
+        "A": np.ndarray(shape=(M,3)),
+        "B": np.ndarray(shape=(N,3)),
+        ...
+      }
+
+    atom_name_filter:
+      None        -> 所有原子
+      "CA"        -> 只取 Cα
+      ["N","CA"]  -> 指定原子
+    """
+
+    st = gemmi.read_structure(mmcif_path)
+    model = st[0]   # 默认只取第一个 model
+
+    chain_coords = {}
+
+    for chain in model:
+        coords = []
+        for res in chain:
+            for atom in res:
+                if atom_name_filter is not None:
+                    if isinstance(atom_name_filter, str):
+                        if atom.name != atom_name_filter:
+                            continue
+                    else:
+                        if atom.name not in atom_name_filter:
+                            continue
+
+                pos = atom.pos
+                coords.append([pos.x, pos.y, pos.z])
+
+        if len(coords) > 0:
+            chain_coords[chain.name] = np.array(coords, dtype=np.float32)
+
+    return chain_coords
+
+
+def read_mmcif_to_chain_coords_types(mmcif_path, atom_name_filter=None):
+    """
+    读取 mmCIF 文件
+    返回:
+      {
+        "A": {
+            "coords": np.ndarray(shape=(M, 3)),
+            "atom_types": List[str]
+        },
+        ...
+      }
+
+    atom_name_filter:
+      None        -> 所有原子
+      "CA"        -> 只取 Cα
+      ["N","CA"]  -> 指定原子
+    """
+
+    st = gemmi.read_structure(mmcif_path)
+    model = st[0]   # 默认只取第一个 model
+
+    chain_data = {}
+
+    for chain in model:
+        coords = []
+        atom_types = []
+
+        for res in chain:
+            for atom in res:
+                if atom_name_filter is not None:
+                    if isinstance(atom_name_filter, str):
+                        if atom.name != atom_name_filter:
+                            continue
+                    else:
+                        if atom.name not in atom_name_filter:
+                            continue
+
+                pos = atom.pos
+                coords.append([pos.x, pos.y, pos.z])
+                atom_types.append(atom.name)
+
+        if coords:
+            chain_data[chain.name] = {
+                "coords": np.array(coords, dtype=np.float32),
+                "atom_types": atom_types
+            }
+
+    return chain_data
+
+def unique_stable(arr):
+    seen = set()
+    out = []
+    for x in arr:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return np.array(out)
+
+def _af3_chain_ids(n: int) -> List[str]:
+    """Generate chain IDs in AF3 'reverse spreadsheet style':
+    A..Z, AA, BA, CA..ZA, AB, BB..ZB, ...
+    """
+    if n <= 0:
+        return []
+    letters = list(string.ascii_uppercase)
+    ids = []
+    # 1-letter IDs
+    for c in letters:
+        ids.append(c)
+        if len(ids) == n:
+            return ids
+    # 2+ letter IDs: first vary the first char, then second char (reverse spreadsheet)
+    # AA, BA, CA, ... ZA, AB, BB, ...
+    k = 2
+    while len(ids) < n:
+        for second in letters:          # A, B, C...
+            for first in letters:       # A, B, C...
+                ids.append(first + second)
+                if len(ids) == n:
+                    return ids
+        k += 1
+        # If you ever need 3+ letters, extend similarly; most use-cases won't.
+        # Implement 3+ letters only if necessary.
+        if k > 2:
+            raise ValueError("Need >702 chain IDs; extend generator for 3+ letters.")
+    return ids
 
 
 class BaseSingleDataset(Dataset):
@@ -319,12 +722,31 @@ class BaseSingleDataset(Dataset):
             sample_indice = self._get_sample_indice(idx=idx)
             data = sample_indice.to_dict()
             data["error"] = error_message
+            if self.bioassembly_dict_dir is not None and "pdb_id" in sample_indice:
+                data["bioassembly_dict_fpath"] = os.path.join(
+                    self.bioassembly_dict_dir, f"{sample_indice.pdb_id}.pkl.gz"
+                )
 
             filename = f"{sample_indice.pdb_id}-{sample_indice.chain_1_id}-{sample_indice.chain_2_id}.json"
             fpath = os.path.join(self.error_dir, filename)
             if not os.path.exists(fpath):
                 with open(fpath, "w") as f:
                     json.dump(data, f)
+
+    def _format_sample_error_context(self, idx: int) -> str:
+        sample_indice = self._get_sample_indice(idx=idx)
+        pdb_id = sample_indice.get("pdb_id", "N/A")
+        chain_1_id = sample_indice.get("chain_1_id", "N/A")
+        chain_2_id = sample_indice.get("chain_2_id", "N/A")
+        bioassembly_dict_fpath = (
+            os.path.join(self.bioassembly_dict_dir, f"{pdb_id}.pkl.gz")
+            if self.bioassembly_dict_dir is not None and pdb_id != "N/A"
+            else "N/A"
+        )
+        return (
+            f"idx={idx}, pdb_id={pdb_id}, chain_1_id={chain_1_id}, "
+            f"chain_2_id={chain_2_id}, bioassembly_dict_fpath={bioassembly_dict_fpath}"
+        )
 
     def __getitem__(self, idx: int):
         """
@@ -337,26 +759,28 @@ class BaseSingleDataset(Dataset):
         Returns:
             A dictionary containing the processed data sample.
         """
-        # Try at most 10 times
+        # Try at most 50 times.
+        last_error_message = ""
         for _ in range(50):
-            data = self.process_one(idx)
-            return data
-            # try:
-            #     # idx = 2332
-            #     # data = self.process_one(idx)
-            #     # return data
-            # except Exception as e:
-            #     error_message = f"{e} at idx {idx}:\n{traceback.format_exc()}"
-            #     self.save_error_data(idx, error_message)
+            try:
+                data = self.process_one(idx)
+                return data
+            except Exception as e:
+                sample_ctx = self._format_sample_error_context(idx=idx)
+                last_error_message = (
+                    f"{e}\n[sample_context] {sample_ctx}\n{traceback.format_exc()}"
+                )
+                self.save_error_data(idx, last_error_message)
 
-            #     if self.random_sample_if_failed:
-            #         logger.exception(f"[skip data {idx}] {error_message}")
-            #         # Random sample an index
-            #         idx = random.choice(range(len(self.indices_list)))
-            #         continue
-            #     else:
-            #         raise Exception(e)
-        return data
+                if self.random_sample_if_failed:
+                    logger.exception(f"[skip data] {sample_ctx}")
+                    # Randomly sample another index and continue.
+                    idx = random.choice(range(len(self.indices_list)))
+                    continue
+                raise RuntimeError(f"[data sample failed] {sample_ctx}") from e
+        raise RuntimeError(
+            f"[data sample failed after retries] {last_error_message[:2000]}"
+        )
 
     def _get_bioassembly_data(
         self, idx: int
@@ -475,7 +899,176 @@ class BaseSingleDataset(Dataset):
         )
         
         # sample code to get the token and protein sequence correspondence
-        
+        # if self.name == 'posebusters_0925':
+        if self.name == 'gen_apo':
+            # pass
+            pdb_id = bioassembly_dict['pdb_id']
+            sequences_dict = bioassembly_dict['sequences']
+            
+            new_sequence_dict = {}
+            for k in sequences_dict:
+                seq = sequences_dict[k]
+                keep_idx = [i for i, aa in enumerate(seq) if aa != "X"]
+                new_seq = "".join(seq[i] for i in keep_idx)
+                if len(new_seq) != len(seq):
+                    print(f'[{pdb_id}] seq found x')
+                new_sequence_dict[k] = new_seq
+            sequences_dict = new_sequence_dict
+            
+            
+            # protein_mask = bioassembly_dict['atom_array'].is_protein.astype(bool)
+            # protein_entity_id = bioassembly_dict['atom_array'].label_entity_id[protein_mask]
+            
+            entity_id_seq_dict = {}
+            entity_id_chain_num = {}
+            for entity_id in sequences_dict.keys():
+                entiy_id_mask = bioassembly_dict['atom_array'].label_entity_id == entity_id
+                asym_ids = bioassembly_dict['atom_array'][entiy_id_mask].asym_id_int
+                chain_num = len(np.unique(asym_ids))
+                entity_id_chain_num[entity_id] = chain_num
+                
+                
+                asym_id = asym_ids[0]
+                asym_id_mask = bioassembly_dict['atom_array'][entiy_id_mask].asym_id_int == asym_id
+                res_names = bioassembly_dict['atom_array'][entiy_id_mask][asym_id_mask].res_name
+                res_ids = bioassembly_dict['atom_array'][entiy_id_mask][asym_id_mask].res_id
+                merged = []
+                last_resid = None
+
+                for r, s in zip(res_names, res_ids):
+                    if s != last_resid:
+                        merged.append(r)
+                        last_resid = s
+
+                merged = np.array(merged)
+                merged = merged[merged != 'UNK'] # delete UNK
+                
+                assert len(merged) == len(sequences_dict[entity_id])
+                
+                entity_id_seq_dict[entity_id] = merged
+            
+            
+            af3_json = build_af3_config(sequences_dict, entity_id_chain_num, entity_id_seq_dict, name=pdb_id)
+
+            
+            
+            # af3_json = build_af3_input(asym_id, entity_id, sym_id, sequences_dict)
+            output_folder = f"{self.name}_af3_input_all"
+            os.makedirs(output_folder, exist_ok=True)
+            def convert_numpy(obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_numpy(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_numpy(v) for v in obj]
+                else:
+                    return obj
+                
+            clean_af3_json = convert_numpy(af3_json)
+
+            with open(f"{output_folder}/{pdb_id}.json", "w") as f:
+                json.dump(clean_af3_json, f, indent=2)
+            # continue
+            return
+            
+            
+            
+            
+            
+            
+            
+        # if self.name == 'posebusters_0925':    
+            # pass
+        if (
+            self.name == 'gen_apo_check'
+            or self.name == 'posebusters_0925'
+            or _is_weighted_apo_dataset(self.name)
+        ):
+            pdb_id = bioassembly_dict['pdb_id']
+            protein_mask = bioassembly_dict['atom_array'].is_protein.astype(bool)
+            protein_entity_id = bioassembly_dict['atom_array'].label_entity_id[protein_mask]
+            aysm_protein_id = bioassembly_dict['atom_array'].asym_id_int[protein_mask]
+            sidx = np.lexsort((aysm_protein_id, protein_entity_id))
+            asym_sorted = aysm_protein_id[sidx]
+            unique_ids = unique_stable(asym_sorted)
+            chain_ids = _af3_chain_ids(len(unique_ids))
+            mapping = dict(zip(unique_ids, chain_ids))
+            
+            mapping_reversed = dict(zip(chain_ids, unique_ids))
+            
+            # mapped_sorted = np.array([mapping[x] for x in asym_sorted])
+            if self.name == 'posebusters_0925':
+                apo_protein_path = (
+                    f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
+                    f'posebusters_0925_af3_input/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
+                )
+                if not os.path.exists(apo_protein_path):
+                    raise FileNotFoundError(f"apo protein path not found: {apo_protein_path}")
+            else:
+                apo_protein_path = (
+                    f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
+                    f'gen_apo_af3_input/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
+                )
+                if not os.path.exists(apo_protein_path):
+                    apo_protein_path = (
+                        f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
+                        f'gen_apo_af3_input_all/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
+                    )
+                    if not os.path.exists(apo_protein_path):
+                        raise FileNotFoundError(f"apo protein path not found: {apo_protein_path}")
+            apo_coords_dict = read_mmcif_to_chain_coords_types(apo_protein_path)
+            
+            apo_atom_coords = np.zeros_like(bioassembly_dict['atom_array'].ref_pos)
+            is_protein_num = 0
+            for chain_id in chain_ids:
+                protein_idx = np.where(protein_mask)[0]   # shape: (N_protein,)
+                full_mask = np.zeros_like(protein_mask, dtype=bool)
+                asym_id = mapping_reversed[chain_id]
+                full_mask[protein_idx] = (aysm_protein_id == asym_id)
+                # full_mask[protein_idx] = (mapped_sorted == chain_id)
+                apo_atom_coords[full_mask] = apo_coords_dict[chain_id]['coords']
+                # assert (bioassembly_dict['atom_array'][full_mask].atom_name == apo_coords_dict[chain_id]['atom_types']).all()
+                
+                atom_names_1 = bioassembly_dict['atom_array'][full_mask].atom_name
+                atom_names_2 = apo_coords_dict[chain_id]['atom_types']
+
+                if not (atom_names_1 == atom_names_2).all():
+                    mismatch_idx = np.where(atom_names_1 != atom_names_2)[0][0]
+                    print(f"[Atom mismatch] chain {chain_id}, index = {mismatch_idx}")
+                    print(f"  bioassembly atom : {atom_names_1[mismatch_idx]}")
+                    print(f"  apo atom         : {atom_names_2[mismatch_idx]}")
+                    raise ValueError("Atom names do not match")
+                is_protein_num += apo_coords_dict[chain_id]['coords'].shape[0]
+            
+            assert is_protein_num == protein_mask.sum()
+            is_ligand = bioassembly_dict['atom_array'].is_ligand.astype(bool)
+            rdkit_coords = bioassembly_dict['atom_array'].ref_pos[is_ligand]
+            rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
+            
+            bioassembly_dict['rdkit_coords'] = rdkit_coords
+            
+            assert is_protein_num + is_ligand.sum()  == bioassembly_dict['atom_array'].shape[0]
+            
+            # random rotation for the rdkit
+            rotation = Rotation.random(num=1)
+            rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
+            rot_matrix = rot_matrix.squeeze(0).numpy()
+            rdkit_coords = rdkit_coords @ rot_matrix.T
+            
+            
+            apo_atom_coords[is_ligand] = rdkit_coords
+            bioassembly_dict['apo_atom_array'] = apo_atom_coords
+            
+            protein_coords = bioassembly_dict['apo_atom_array'][protein_mask]
+            protein_coords = protein_coords - protein_coords.mean(axis=0)
+            bioassembly_dict['apo_atom_array'][protein_mask] = protein_coords
+            complex_apo_coords = bioassembly_dict['apo_atom_array']
+
         
         # rdkit coordinate
         if 'pdbbind' in self.name or 'posebustersv2' in self.name:
@@ -617,7 +1210,12 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
-        if ('pdbbind' in self.name or 'posebustersv2' in self.name) and self.use_apo_pos:
+        if (
+            'pdbbind' in self.name
+            or 'posebustersv2' in self.name
+            or 'posebusters_0925' in self.name
+            or _is_weighted_apo_dataset(self.name)
+        ) and self.use_apo_pos:
             feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
             if self.cropping_configs['crop_size'] > -1:
                 feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]

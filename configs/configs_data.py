@@ -226,6 +226,63 @@ data_configs = {
         },
         **deepcopy(default_weighted_pdb_configs),
     },
+    "weightedPDB_4w_prot_lig_apo": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR,
+                "indices/prot_ligand_filter_apo_struct.csv",
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "weightedPDB_4w_prot_lig_apo_rmsd_lt_100": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR,
+                "indices/prot_ligand_filter_apo_struct_rmsd_lt_100.csv",
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # 47539 rows; do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "weightedPDB_4w_prot_lig_apo_rmsd_lt_30": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR,
+                "indices/prot_ligand_filter_apo_struct_rmsd_lt_30.csv",
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # 24987 rows; do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
     "nuc_related_indices": {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
@@ -275,7 +332,48 @@ data_configs = {
                 DATA_ROOT_DIR, 
                 # "indices/posebusters_indices_singlechain.csv",
                 # "indices/posebusters_indices_multichain.csv" 
-                "indices/posebusters_indices_mainchain_interface.csv"
+                "indices/posebusters_indices_mainchain_interface2.csv"
+            ),
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    "gen_apo": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                DATA_ROOT_DIR, "mmcif_bioassembly"
+            ),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR, 
+                # "indices/posebusters_indices_singlechain.csv",
+                # "indices/posebusters_indices_multichain.csv" 
+                # "indices/prot_ligand_filter_2w.csv"
+                "indices/prot_ligand_filter_minus_2w.csv"
+            ),
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    "gen_apo_check": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(
+                DATA_ROOT_DIR, "mmcif_bioassembly"
+            ),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR, 
+                # "indices/posebusters_indices_singlechain.csv",
+                # "indices/posebusters_indices_multichain.csv" 
+                # "indices/prot_ligand_filter_2w.csv"
+                # "indices/prot_ligand_filter_2w_filtered.csv"
+                "indices/prot_ligand_filter_apo.csv"
             ),
             "pdb_list": "",
             "find_pocket": True,

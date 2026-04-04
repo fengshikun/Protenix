@@ -1008,7 +1008,9 @@ class MMCIFParser:
         else:
             atoms = mol.GetAtoms()
         
-        mask = atom_array.res_name == 'UNL'
+        
+        mask = atom_array.res_name == (atom_array[-1].res_name) # TODO fix
+        # mask = atom_array.res_name == 'UNL'
         if len(atoms) != mask.sum():
             print(f"Warning: ligand atom number not match: {len(atoms)} != {mask.sum()}")
             # load the org mol2 file
@@ -1108,8 +1110,8 @@ class MMCIFParser:
                 # no atoms left
                 return bioassembly_dict
         
-        apo_protein_coords = atom_array2[atom_array2.res_name!='UNL'].coord
-
+        # apo_protein_coords = atom_array2[atom_array2.res_name!='UNL'].coord
+        apo_protein_coords = atom_array2[atom_array2.res_name!=(atom_array2[-1].res_name)].coord
         assert len(apo_protein_coords) + ligand_coords.shape[1] == len(atom_array), f"length not match: {len(apo_protein_coords)} + {ligand_coords.shape[1]} != {len(atom_array)}"
         atom_array_checkpoints_len1 = len(atom_array)
         
@@ -2718,6 +2720,8 @@ class AddAtomArrayAnnot(object):
         for ccd_id in np.unique(atom_array.res_name):
             # create ref conformer for each CCD ID
             ref_result = get_ccd_ref_info(ccd_id)
+            
+        
             if ref_result:
                 for space_uid in np.unique(
                     atom_array[atom_array.res_name == ccd_id].ref_space_uid
@@ -2745,6 +2749,8 @@ class AddAtomArrayAnnot(object):
                 ref_charge.append(0)
 
             else:
+                if atom.res_name == '1K2':
+                    print('xxx')
                 atom_map, coord, charge, mask = ref_result
                 atom_sub_idx = atom_map[atom.atom_name]
                 ref_mask.append(mask[atom_sub_idx])
@@ -2775,6 +2781,9 @@ class AddAtomArrayAnnot(object):
             res_atom = atom_array[start:stop]
             curr_res_atom_idx = list(range(len(res_atom)))
 
+            if '1K2' == res_atom.res_name[0]:
+                print('xxx')
+            
             res_dict = get_ccd_ref_info(ccd_code=res_atom.res_name[0])
             if not res_dict:
                 res_perm.extend([[i] for i in curr_res_atom_idx])
