@@ -122,6 +122,9 @@ default_weighted_pdb_configs = {
 }
 
 DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/vepfs-mlp2/mlp-public/shikunfeng/Datas/Proteinix")
+WEIGHTED_APO_LIGAND_MULTI_CONF_DIR = os.path.join(
+    DATA_ROOT_DIR, "weightedPDB_4w_prot_lig_apo_ligand_multiconf_10"
+)
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md
@@ -230,6 +233,7 @@ data_configs = {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
             "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "ligand_multi_conf_dir": WEIGHTED_APO_LIGAND_MULTI_CONF_DIR,
             "indices_fpath": os.path.join(
                 DATA_ROOT_DIR,
                 "indices/prot_ligand_filter_apo_struct.csv",
@@ -249,6 +253,7 @@ data_configs = {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
             "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "ligand_multi_conf_dir": WEIGHTED_APO_LIGAND_MULTI_CONF_DIR,
             "indices_fpath": os.path.join(
                 DATA_ROOT_DIR,
                 "indices/prot_ligand_filter_apo_struct_rmsd_lt_100.csv",
@@ -268,6 +273,7 @@ data_configs = {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
             "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "ligand_multi_conf_dir": WEIGHTED_APO_LIGAND_MULTI_CONF_DIR,
             "indices_fpath": os.path.join(
                 DATA_ROOT_DIR,
                 "indices/prot_ligand_filter_apo_struct_rmsd_lt_30.csv",
@@ -379,6 +385,39 @@ data_configs = {
             "find_pocket": True,
             "find_all_pockets": False,
             "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    "gen_apo_pdbbind_test_proteinix_overlap": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath":
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.proteinix_overlap.test.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),
+            "exclusion": {
+                "pdb_id": ListValue(["6o0h", "6h9v"]),
+            },
+        },
+        **deepcopy(default_test_configs),
+    },
+    "gen_apo_check_pdbbind_test_proteinix_overlap": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath":
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.proteinix_overlap.test.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "keep_only_main_ligand": True,
+            "max_n_token": 2000,
+            "exclusion": {
+                "pdb_id": ListValue(["6o0h", "6h9v"]),
+            },
         },
         **deepcopy(default_test_configs),
     },
@@ -497,6 +536,19 @@ data_configs = {
             ),
             "indices_fpath": 
                 "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.test.csv",
+            "pdb_list": "",
+            "find_pocket": True,
+            "find_all_pockets": False,
+            "max_n_token": GlobalConfigValue("test_max_n_token"),  # filter data
+        },
+        **deepcopy(default_test_configs),
+    },
+    "pdbbind_test_proteinix_overlap": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath":
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v3_data/output_ligand_prot.proteinix_overlap.test.csv",
             "pdb_list": "",
             "find_pocket": True,
             "find_all_pockets": False,

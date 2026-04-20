@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+import csv
 import json
 import os
 import random
@@ -40,7 +42,7 @@ from protenix.data.utils import (
     make_dummy_feature,
 )
 from protenix.utils.cropping import CropData
-from protenix.utils.file_io import read_indices_csv
+from protenix.utils.file_io import load_gzip_pickle, read_indices_csv
 from protenix.utils.logger import get_logger
 from protenix.utils.torch_utils import dict_to_tensor
 from scipy.spatial.transform import Rotation
@@ -50,6 +52,10 @@ import string
 
 
 logger = get_logger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_APO_POCKET_GT_CSV = (
+    PROJECT_ROOT / "tools/v3_data/apo_pocket_centers_local_align.slim.csv"
+)
 
 
 import json
@@ -86,6 +92,221 @@ def unique_stable(arr):
 
 def _is_weighted_apo_dataset(dataset_name: str) -> bool:
     return dataset_name.startswith("weightedPDB_4w_prot_lig_apo")
+
+
+def _is_gen_apo_dataset(dataset_name: str) -> bool:
+    return dataset_name == "gen_apo" or (
+        dataset_name.startswith("gen_apo_")
+        and not dataset_name.startswith("gen_apo_check")
+    )
+
+
+def _is_gen_apo_check_dataset(dataset_name: str) -> bool:
+    return dataset_name == "gen_apo_check" or dataset_name.startswith(
+        "gen_apo_check_"
+    )
+
+
+def _get_gen_apo_export_tag(dataset_name: str) -> Optional[str]:
+    if dataset_name == "gen_apo" or dataset_name == "gen_apo_check":
+        return "gen_apo"
+    if dataset_name.startswith("gen_apo_check_"):
+        suffix = dataset_name[len("gen_apo_check_") :]
+        return f"gen_apo_{suffix}"
+    if dataset_name.startswith("gen_apo_"):
+        return dataset_name
+    return None
+
+
+def _clean_optional_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _normalize_apo_pocket_dataset_name(dataset_name: str) -> str:
+    if _is_weighted_apo_dataset(dataset_name):
+        return "weightedPDB_4w_prot_lig_apo"
+    return dataset_name
+
+
+def _normalize_apo_ligand_init_mode(mode: Any) -> str:
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "mixed":
+        return "mixed_50_50"
+    return normalized_mode
+
+
+def _get_supported_apo_ligand_init_modes() -> set[str]:
+    return {"protein_center", "pocket_center", "mixed_50_50"}
+
+
+def _dataset_supports_apo_pocket_center(dataset_name: str) -> bool:
+    normalized_name = _normalize_apo_pocket_dataset_name(dataset_name)
+    return normalized_name in {"weightedPDB_4w_prot_lig_apo", "posebusters_0925"}
+
+
+def _is_protein_mol_type(mol_type: Any) -> bool:
+    return _clean_optional_text(mol_type).lower() == "prot"
+
+
+def _is_ligand_mol_type(mol_type: Any) -> bool:
+    return "lig" in _clean_optional_text(mol_type).lower()
+
+
+def _extract_protein_ligand_chain_ids(
+    sample_indice: Any,
+) -> tuple[str, str]:
+    mol_1_type = sample_indice.get("mol_1_type", "")
+    mol_2_type = sample_indice.get("mol_2_type", "")
+    chain_1_id = _clean_optional_text(sample_indice.get("chain_1_id", ""))
+    chain_2_id = _clean_optional_text(sample_indice.get("chain_2_id", ""))
+
+    if _is_protein_mol_type(mol_1_type) and _is_ligand_mol_type(mol_2_type):
+        return chain_1_id, chain_2_id
+    if _is_protein_mol_type(mol_2_type) and _is_ligand_mol_type(mol_1_type):
+        return chain_2_id, chain_1_id
+
+    raise ValueError(
+        "Failed to determine protein/ligand chain ids for apo pocket lookup: "
+        f"mol_1_type={mol_1_type}, mol_2_type={mol_2_type}"
+    )
+
+
+@functools.lru_cache(maxsize=8)
+def _load_apo_pocket_center_lookup(
+    csv_fpath: str,
+) -> dict[tuple[str, str, str, str, str], np.ndarray]:
+    lookup: dict[tuple[str, str, str, str, str], np.ndarray] = {}
+    with open(csv_fpath, newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if _clean_optional_text(row.get("status")) != "ok":
+                continue
+            dataset_name = _normalize_apo_pocket_dataset_name(
+                _clean_optional_text(row.get("dataset"))
+            )
+            if not _dataset_supports_apo_pocket_center(dataset_name):
+                continue
+
+            key = (
+                dataset_name,
+                _clean_optional_text(row.get("pdb_id")),
+                _clean_optional_text(row.get("assembly_id")),
+                _clean_optional_text(row.get("protein_chain_id")),
+                _clean_optional_text(row.get("ligand_chain_id")),
+            )
+            lookup[key] = np.asarray(
+                [
+                    float(row["pocket_center_x"]),
+                    float(row["pocket_center_y"]),
+                    float(row["pocket_center_z"]),
+                ],
+                dtype=np.float32,
+            )
+    return lookup
+
+
+def _lookup_apo_pocket_center(
+    sample_indice: Any,
+    dataset_name: str,
+    csv_fpath: str,
+) -> np.ndarray:
+    normalized_dataset = _normalize_apo_pocket_dataset_name(dataset_name)
+    protein_chain_id, ligand_chain_id = _extract_protein_ligand_chain_ids(sample_indice)
+    assembly_id = _clean_optional_text(sample_indice.get("assembly_id", ""))
+    lookup = _load_apo_pocket_center_lookup(csv_fpath)
+
+    key = (
+        normalized_dataset,
+        _clean_optional_text(sample_indice.get("pdb_id", "")),
+        assembly_id,
+        protein_chain_id,
+        ligand_chain_id,
+    )
+    pocket_center = lookup.get(key)
+    if pocket_center is None and assembly_id:
+        key = (
+            normalized_dataset,
+            _clean_optional_text(sample_indice.get("pdb_id", "")),
+            "",
+            protein_chain_id,
+            ligand_chain_id,
+        )
+        pocket_center = lookup.get(key)
+
+    if pocket_center is None:
+        raise KeyError(
+            "apo pocket center not found for "
+            f"{normalized_dataset}:{sample_indice.get('pdb_id')}:{protein_chain_id}:{ligand_chain_id}"
+        )
+    return pocket_center.copy()
+
+
+def _resolve_apo_prediction_roots(dataset_name: str) -> list[str]:
+    if dataset_name == "posebusters_0925":
+        return ["posebusters_0925_af3_input/af3_predictions"]
+
+    if _is_weighted_apo_dataset(dataset_name):
+        export_tag = "gen_apo"
+    else:
+        export_tag = _get_gen_apo_export_tag(dataset_name)
+
+    if export_tag is None:
+        return []
+
+    return [
+        f"{export_tag}_af3_input/af3_predictions",
+        f"{export_tag}_af3_input_all/af3_predictions",
+    ]
+
+
+def _uses_generated_apo_coords(dataset_name: str) -> bool:
+    return (
+        _is_gen_apo_check_dataset(dataset_name)
+        or dataset_name == "posebusters_0925"
+        or _is_weighted_apo_dataset(dataset_name)
+    )
+
+
+def _uses_precomputed_apo_coords(dataset_name: str) -> bool:
+    return (
+        ("pdbbind" in dataset_name or "posebustersv2" in dataset_name)
+        and not _is_gen_apo_check_dataset(dataset_name)
+    )
+
+
+def _uses_apo_coords(dataset_name: str) -> bool:
+    return _uses_generated_apo_coords(dataset_name) or _uses_precomputed_apo_coords(
+        dataset_name
+    )
+
+
+def _convert_numpy_for_json(obj: Any) -> Any:
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_numpy_for_json(v) for v in obj]
+    return obj
+
+
+@functools.lru_cache(maxsize=2048)
+def _load_weighted_ligand_multi_conf_cache(
+    cache_fpath: str,
+) -> Optional[dict[str, Any]]:
+    cache_path = Path(cache_fpath)
+    if not cache_path.exists():
+        return None
+    return load_gzip_pickle(cache_path)
 
 
 def _af3_chain_ids(n: int) -> List[str]:
@@ -478,6 +699,7 @@ class BaseSingleDataset(Dataset):
         self.indices_fpath = indices_fpath
         self.cropping_configs = cropping_configs
         self.name = name
+        self.stage = kwargs.get("stage", "train")
         # General dataset configs
         self.ref_pos_augment = kwargs.get("ref_pos_augment", True)
         self.lig_atom_rename = kwargs.get("lig_atom_rename", False)
@@ -493,6 +715,7 @@ class BaseSingleDataset(Dataset):
         self.find_eval_chain_interface = kwargs.get("find_eval_chain_interface", False)
         self.group_by_pdb_id = kwargs.get("group_by_pdb_id", False)  # for test set
         self.sort_by_n_token = kwargs.get("sort_by_n_token", False)
+        self.keep_only_main_ligand = kwargs.get("keep_only_main_ligand", False)
 
         # Typically used for training set
         self.random_sample_if_failed = kwargs.get("random_sample_if_failed", False)
@@ -522,6 +745,7 @@ class BaseSingleDataset(Dataset):
         self.error_dir = kwargs.get("error_dir", None)
         if self.error_dir is not None:
             os.makedirs(self.error_dir, exist_ok=True)
+        self.ligand_multi_conf_dir = kwargs.get("ligand_multi_conf_dir", "")
 
         self.msa_featurizer = msa_featurizer
         self.template_featurizer = template_featurizer
@@ -530,6 +754,26 @@ class BaseSingleDataset(Dataset):
         self.indices_list = self.read_indices_list(indices_fpath)
         
         self.use_apo_pos = kwargs.get("use_apo_pos", False)
+        self.apo_ligand_init_mode = _normalize_apo_ligand_init_mode(
+            kwargs.get("apo_ligand_init_mode", "protein_center")
+        )
+        self.apo_pocket_noise_sigma = float(
+            kwargs.get("apo_pocket_noise_sigma", 0.0)
+        )
+        self.apo_pocket_gt_csv = kwargs.get(
+            "apo_pocket_gt_csv", str(DEFAULT_APO_POCKET_GT_CSV)
+        )
+        if self.apo_ligand_init_mode not in _get_supported_apo_ligand_init_modes():
+            raise ValueError(
+                "apo_ligand_init_mode must be one of "
+                f"{sorted(_get_supported_apo_ligand_init_modes())}, got "
+                f"{self.apo_ligand_init_mode}"
+            )
+        if self.apo_pocket_noise_sigma < 0:
+            raise ValueError(
+                "apo_pocket_noise_sigma must be non-negative, got "
+                f"{self.apo_pocket_noise_sigma}"
+            )
         
         # protein encoder: esm
         esm_info = kwargs.get("esm_config", {})
@@ -554,6 +798,13 @@ class BaseSingleDataset(Dataset):
             #     embedding_dim=esm_info.embedding_dim,
             #     error_dir="./esm_embeddings/",
             # )
+
+    def _resolve_apo_ligand_init_mode(self) -> str:
+        if self.apo_ligand_init_mode != "mixed_50_50":
+            return self.apo_ligand_init_mode
+        if self.stage == "train":
+            return "pocket_center" if np.random.rand() < 0.5 else "protein_center"
+        return "protein_center"
 
     @staticmethod
     def read_pdb_list(pdb_list: Union[list, str]) -> Optional[list]:
@@ -879,6 +1130,212 @@ class BaseSingleDataset(Dataset):
             atom_array.sym_id_int[mask] = _shuffle(atom_array.sym_id_int[mask])
         return atom_array
 
+    def _get_weighted_apo_ligand_coords(
+        self, bioassembly_dict: dict[str, Any]
+    ) -> Optional[np.ndarray]:
+        if not self.ligand_multi_conf_dir:
+            return None
+
+        pdb_id = bioassembly_dict.get("pdb_id", "")
+        if not pdb_id:
+            return None
+
+        cache_fpath = os.path.join(self.ligand_multi_conf_dir, f"{pdb_id}.pkl.gz")
+        cache_data = _load_weighted_ligand_multi_conf_cache(cache_fpath)
+        if cache_data is None:
+            return None
+
+        coords = np.asarray(cache_data.get("coords"))
+        is_ligand = bioassembly_dict["atom_array"].is_ligand.astype(bool)
+        ligand_atom_count = int(is_ligand.sum())
+        if coords.ndim != 3 or coords.shape[1] != ligand_atom_count or coords.shape[2] != 3:
+            logger.warning(
+                "[%s] invalid ligand multiconf cache for %s: expected (*, %d, 3), got %s; fallback to ref_pos",
+                self.name,
+                pdb_id,
+                ligand_atom_count,
+                tuple(coords.shape),
+            )
+            return None
+
+        conf_idx = np.random.randint(coords.shape[0])
+        return coords[conf_idx].astype(
+            bioassembly_dict["atom_array"].ref_pos.dtype, copy=False
+        )
+
+    def _resolve_generated_apo_protein_path(self, pdb_id: str) -> str:
+        prediction_roots = _resolve_apo_prediction_roots(self.name)
+        for prediction_root in prediction_roots:
+            candidate = os.path.join(
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix",
+                prediction_root,
+                pdb_id,
+                f"{pdb_id}_model.cif",
+            )
+            if os.path.exists(candidate):
+                return candidate
+
+        raise FileNotFoundError(
+            f"apo protein path not found for {pdb_id} in {prediction_roots}"
+        )
+
+    def _build_generated_apo_complex_coords(
+        self, sample_indice: dict[str, Any], bioassembly_dict: dict[str, Any]
+    ) -> tuple[np.ndarray, bool]:
+        pdb_id = bioassembly_dict["pdb_id"]
+        protein_mask = bioassembly_dict["atom_array"].is_protein.astype(bool)
+        protein_entity_id = bioassembly_dict["atom_array"].label_entity_id[protein_mask]
+        asym_protein_id = bioassembly_dict["atom_array"].asym_id_int[protein_mask]
+        sidx = np.lexsort((asym_protein_id, protein_entity_id))
+        asym_sorted = asym_protein_id[sidx]
+        unique_ids = unique_stable(asym_sorted)
+        chain_ids = _af3_chain_ids(len(unique_ids))
+        mapping_reversed = dict(zip(chain_ids, unique_ids))
+
+        apo_protein_path = self._resolve_generated_apo_protein_path(pdb_id)
+        apo_coords_dict = read_mmcif_to_chain_coords_types(apo_protein_path)
+
+        apo_atom_coords = np.zeros_like(bioassembly_dict["atom_array"].ref_pos)
+        protein_idx = np.where(protein_mask)[0]
+        protein_atom_count = 0
+
+        for chain_id in chain_ids:
+            if chain_id not in apo_coords_dict:
+                raise KeyError(
+                    f"[{pdb_id}] AF3 chain {chain_id} missing in {apo_protein_path}"
+                )
+
+            full_mask = np.zeros_like(protein_mask, dtype=bool)
+            asym_id = mapping_reversed[chain_id]
+            full_mask[protein_idx] = asym_protein_id == asym_id
+
+            expected_atom_names = bioassembly_dict["atom_array"][full_mask].atom_name
+            apo_chain_coords = np.asarray(
+                apo_coords_dict[chain_id]["coords"],
+                dtype=apo_atom_coords.dtype,
+            )
+            apo_chain_atom_names = np.asarray(
+                apo_coords_dict[chain_id]["atom_types"],
+                dtype=expected_atom_names.dtype,
+            )
+
+            if apo_chain_coords.shape != apo_atom_coords[full_mask].shape:
+                raise ValueError(
+                    f"[{pdb_id}] AF3 chain {chain_id} atom count mismatch: "
+                    f"expected {apo_atom_coords[full_mask].shape[0]}, "
+                    f"got {apo_chain_coords.shape[0]}"
+                )
+
+            apo_atom_coords[full_mask] = apo_chain_coords
+
+            if not (expected_atom_names == apo_chain_atom_names).all():
+                mismatch_idx = np.where(expected_atom_names != apo_chain_atom_names)[0][0]
+                print(f"[Atom mismatch] chain {chain_id}, index = {mismatch_idx}")
+                print(f"  bioassembly atom : {expected_atom_names[mismatch_idx]}")
+                print(f"  apo atom         : {apo_chain_atom_names[mismatch_idx]}")
+                raise ValueError("Atom names do not match")
+
+            protein_atom_count += apo_chain_coords.shape[0]
+
+        if protein_atom_count != int(protein_mask.sum()):
+            raise ValueError(
+                f"[{pdb_id}] protein atom count mismatch after AF3 mapping: "
+                f"{protein_atom_count} vs {int(protein_mask.sum())}"
+            )
+
+        is_ligand = bioassembly_dict["atom_array"].is_ligand.astype(bool)
+        rdkit_coords = self._get_weighted_apo_ligand_coords(bioassembly_dict=bioassembly_dict)
+        if rdkit_coords is None:
+            rdkit_coords = bioassembly_dict["atom_array"].ref_pos[is_ligand]
+        rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
+        bioassembly_dict["rdkit_coords"] = rdkit_coords
+
+        if protein_atom_count + int(is_ligand.sum()) != bioassembly_dict["atom_array"].shape[0]:
+            raise ValueError(
+                f"[{pdb_id}] total atom count mismatch after apo assembly"
+            )
+
+        rotation = Rotation.random(num=1)
+        rot_matrix = torch.from_numpy(rotation.as_matrix()).float().squeeze(0).numpy()
+        rdkit_coords = rdkit_coords @ rot_matrix.T
+
+        effective_init_mode = self._resolve_apo_ligand_init_mode()
+        protein_center = apo_atom_coords[protein_mask].mean(axis=0)
+        ligand_translation = np.zeros(3, dtype=rdkit_coords.dtype)
+        apo_center_ligand_to_origin = True
+        if (
+            effective_init_mode == "pocket_center"
+            and _dataset_supports_apo_pocket_center(self.name)
+        ):
+            pocket_center = _lookup_apo_pocket_center(
+                sample_indice=sample_indice,
+                dataset_name=self.name,
+                csv_fpath=self.apo_pocket_gt_csv,
+            ).astype(rdkit_coords.dtype, copy=False)
+            if self.stage == "train" and self.apo_pocket_noise_sigma > 0:
+                pocket_center = pocket_center + np.random.normal(
+                    loc=0.0,
+                    scale=self.apo_pocket_noise_sigma,
+                    size=3,
+                ).astype(rdkit_coords.dtype, copy=False)
+            ligand_translation = pocket_center - protein_center
+            apo_center_ligand_to_origin = False
+
+        apo_atom_coords[is_ligand] = rdkit_coords + ligand_translation
+        bioassembly_dict["apo_atom_array"] = apo_atom_coords
+
+        protein_coords = bioassembly_dict["apo_atom_array"][protein_mask]
+        protein_coords = protein_coords - protein_center
+        bioassembly_dict["apo_atom_array"][protein_mask] = protein_coords
+        return bioassembly_dict["apo_atom_array"], apo_center_ligand_to_origin
+
+    def _keep_only_target_ligand(
+        self, sample_indice: dict[str, Any], bioassembly_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not self.keep_only_main_ligand:
+            return bioassembly_dict
+
+        _, ligand_chain_id = _extract_protein_ligand_chain_ids(sample_indice)
+        atom_array = bioassembly_dict["atom_array"]
+        token_array = bioassembly_dict["token_array"]
+
+        if ligand_chain_id not in set(atom_array.chain_id.tolist()):
+            raise KeyError(
+                f"Cannot find target ligand chain {ligand_chain_id} in atom_array "
+                f"for {bioassembly_dict.get('pdb_id', sample_indice.get('pdb_id', 'N/A'))}"
+            )
+
+        centre_atom_indices = token_array.get_annotation("centre_atom_index")
+        centre_atom_array = atom_array[centre_atom_indices]
+        token_is_ligand = centre_atom_array.is_ligand.astype(bool)
+        keep_token_mask = (~token_is_ligand) | (centre_atom_array.chain_id == ligand_chain_id)
+
+        if keep_token_mask.all():
+            # Downstream confidence code expects asym IDs to be contiguous from
+            # 0..N_chain-1. Keep this invariant even if the source bioassembly
+            # already contains gaps.
+            bioassembly_dict["atom_array"] = self._reassign_atom_array_chain_id(
+                atom_array
+            )
+            return bioassembly_dict
+
+        selected_token_indices = np.flatnonzero(keep_token_mask)
+        (
+            bioassembly_dict["token_array"],
+            bioassembly_dict["atom_array"],
+            _,
+            _,
+            _,
+        ) = CropData.select_by_token_indices(
+            token_array=token_array,
+            atom_array=atom_array,
+            selected_token_indices=selected_token_indices,
+        )
+        bioassembly_dict["atom_array"] = self._reassign_atom_array_chain_id(
+            bioassembly_dict["atom_array"]
+        )
+        return bioassembly_dict
+
     def process_one(
         self, idx: int, return_atom_token_array: bool = False
     ) -> dict[str, dict]:
@@ -898,83 +1355,79 @@ class BaseSingleDataset(Dataset):
             self._get_bioassembly_data(idx=idx)
         )
         
-        # sample code to get the token and protein sequence correspondence
-        # if self.name == 'posebusters_0925':
-        if self.name == 'gen_apo':
-            # pass
-            pdb_id = bioassembly_dict['pdb_id']
-            sequences_dict = bioassembly_dict['sequences']
-            
-            new_sequence_dict = {}
-            for k in sequences_dict:
-                seq = sequences_dict[k]
-                keep_idx = [i for i, aa in enumerate(seq) if aa != "X"]
-                new_seq = "".join(seq[i] for i in keep_idx)
-                if len(new_seq) != len(seq):
-                    print(f'[{pdb_id}] seq found x')
-                new_sequence_dict[k] = new_seq
-            sequences_dict = new_sequence_dict
-            
-            
-            # protein_mask = bioassembly_dict['atom_array'].is_protein.astype(bool)
-            # protein_entity_id = bioassembly_dict['atom_array'].label_entity_id[protein_mask]
-            
+        # Export protein-only AF3 JSON while preserving the same entity/chain
+        # ordering that gen_apo_check later uses for atom order validation.
+        if _is_gen_apo_dataset(self.name):
+            pdb_id = bioassembly_dict["pdb_id"]
+            atom_array = bioassembly_dict["atom_array"]
+            protein_mask = atom_array.is_protein.astype(bool)
+            protein_entity_ids = sorted(
+                {str(x) for x in atom_array.label_entity_id[protein_mask].tolist()},
+                key=str,
+            )
+
+            sequences_dict = bioassembly_dict["sequences"]
             entity_id_seq_dict = {}
             entity_id_chain_num = {}
-            for entity_id in sequences_dict.keys():
-                entiy_id_mask = bioassembly_dict['atom_array'].label_entity_id == entity_id
-                asym_ids = bioassembly_dict['atom_array'][entiy_id_mask].asym_id_int
-                chain_num = len(np.unique(asym_ids))
-                entity_id_chain_num[entity_id] = chain_num
-                
-                
+            entity_to_seq = {}
+
+            for entity_id in protein_entity_ids:
+                if entity_id not in sequences_dict:
+                    raise KeyError(
+                        f"[{pdb_id}] protein entity {entity_id} not found in sequences"
+                    )
+
+                seq = sequences_dict[entity_id]
+                keep_idx = [i for i, aa in enumerate(seq) if aa != "X"]
+                clean_seq = "".join(seq[i] for i in keep_idx)
+                if len(clean_seq) != len(seq):
+                    print(f"[{pdb_id}] seq found x in entity {entity_id}")
+                entity_to_seq[entity_id] = clean_seq
+
+                entity_mask = (atom_array.label_entity_id == entity_id) & protein_mask
+                asym_ids = atom_array[entity_mask].asym_id_int
+                entity_id_chain_num[entity_id] = len(np.unique(asym_ids))
+
                 asym_id = asym_ids[0]
-                asym_id_mask = bioassembly_dict['atom_array'][entiy_id_mask].asym_id_int == asym_id
-                res_names = bioassembly_dict['atom_array'][entiy_id_mask][asym_id_mask].res_name
-                res_ids = bioassembly_dict['atom_array'][entiy_id_mask][asym_id_mask].res_id
+                asym_id_mask = atom_array[entity_mask].asym_id_int == asym_id
+                res_names = atom_array[entity_mask][asym_id_mask].res_name
+                res_ids = atom_array[entity_mask][asym_id_mask].res_id
+
                 merged = []
                 last_resid = None
-
-                for r, s in zip(res_names, res_ids):
-                    if s != last_resid:
-                        merged.append(r)
-                        last_resid = s
+                for res_name, res_id in zip(res_names, res_ids):
+                    if res_id != last_resid:
+                        merged.append(res_name)
+                        last_resid = res_id
 
                 merged = np.array(merged)
-                merged = merged[merged != 'UNK'] # delete UNK
-                
-                assert len(merged) == len(sequences_dict[entity_id])
-                
+                merged = merged[merged != "UNK"]
+                if len(merged) != len(entity_to_seq[entity_id]):
+                    raise ValueError(
+                        f"[{pdb_id}] entity {entity_id} residue count mismatch: "
+                        f"{len(merged)} residues vs {len(entity_to_seq[entity_id])} sequence"
+                    )
                 entity_id_seq_dict[entity_id] = merged
-            
-            
-            af3_json = build_af3_config(sequences_dict, entity_id_chain_num, entity_id_seq_dict, name=pdb_id)
 
-            
-            
-            # af3_json = build_af3_input(asym_id, entity_id, sym_id, sequences_dict)
-            output_folder = f"{self.name}_af3_input_all"
+            af3_json = build_af3_config(
+                entity_to_seq,
+                entity_id_chain_num,
+                entity_id_seq_dict,
+                name=pdb_id,
+            )
+
+            export_tag = _get_gen_apo_export_tag(self.name)
+            if export_tag is None:
+                raise ValueError(f"Cannot resolve AF3 export tag for dataset {self.name}")
+            output_folder = f"{export_tag}_af3_input_all"
             os.makedirs(output_folder, exist_ok=True)
-            def convert_numpy(obj):
-                if isinstance(obj, np.integer):
-                    return int(obj)
-                elif isinstance(obj, np.floating):
-                    return float(obj)
-                elif isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_numpy(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_numpy(v) for v in obj]
-                else:
-                    return obj
-                
-            clean_af3_json = convert_numpy(af3_json)
-
             with open(f"{output_folder}/{pdb_id}.json", "w") as f:
-                json.dump(clean_af3_json, f, indent=2)
-            # continue
+                json.dump(_convert_numpy_for_json(af3_json), f, indent=2)
             return
+
+        bioassembly_dict = self._keep_only_target_ligand(
+            sample_indice=sample_indice, bioassembly_dict=bioassembly_dict
+        )
             
             
             
@@ -984,94 +1437,18 @@ class BaseSingleDataset(Dataset):
             
         # if self.name == 'posebusters_0925':    
             # pass
-        if (
-            self.name == 'gen_apo_check'
-            or self.name == 'posebusters_0925'
-            or _is_weighted_apo_dataset(self.name)
-        ):
-            pdb_id = bioassembly_dict['pdb_id']
-            protein_mask = bioassembly_dict['atom_array'].is_protein.astype(bool)
-            protein_entity_id = bioassembly_dict['atom_array'].label_entity_id[protein_mask]
-            aysm_protein_id = bioassembly_dict['atom_array'].asym_id_int[protein_mask]
-            sidx = np.lexsort((aysm_protein_id, protein_entity_id))
-            asym_sorted = aysm_protein_id[sidx]
-            unique_ids = unique_stable(asym_sorted)
-            chain_ids = _af3_chain_ids(len(unique_ids))
-            mapping = dict(zip(unique_ids, chain_ids))
-            
-            mapping_reversed = dict(zip(chain_ids, unique_ids))
-            
-            # mapped_sorted = np.array([mapping[x] for x in asym_sorted])
-            if self.name == 'posebusters_0925':
-                apo_protein_path = (
-                    f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
-                    f'posebusters_0925_af3_input/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
+        if _uses_generated_apo_coords(self.name):
+            complex_apo_coords, apo_center_ligand_to_origin = (
+                self._build_generated_apo_complex_coords(
+                    sample_indice=sample_indice,
+                    bioassembly_dict=bioassembly_dict,
                 )
-                if not os.path.exists(apo_protein_path):
-                    raise FileNotFoundError(f"apo protein path not found: {apo_protein_path}")
-            else:
-                apo_protein_path = (
-                    f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
-                    f'gen_apo_af3_input/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
-                )
-                if not os.path.exists(apo_protein_path):
-                    apo_protein_path = (
-                        f'/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/'
-                        f'gen_apo_af3_input_all/af3_predictions/{pdb_id}/{pdb_id}_model.cif'
-                    )
-                    if not os.path.exists(apo_protein_path):
-                        raise FileNotFoundError(f"apo protein path not found: {apo_protein_path}")
-            apo_coords_dict = read_mmcif_to_chain_coords_types(apo_protein_path)
-            
-            apo_atom_coords = np.zeros_like(bioassembly_dict['atom_array'].ref_pos)
-            is_protein_num = 0
-            for chain_id in chain_ids:
-                protein_idx = np.where(protein_mask)[0]   # shape: (N_protein,)
-                full_mask = np.zeros_like(protein_mask, dtype=bool)
-                asym_id = mapping_reversed[chain_id]
-                full_mask[protein_idx] = (aysm_protein_id == asym_id)
-                # full_mask[protein_idx] = (mapped_sorted == chain_id)
-                apo_atom_coords[full_mask] = apo_coords_dict[chain_id]['coords']
-                # assert (bioassembly_dict['atom_array'][full_mask].atom_name == apo_coords_dict[chain_id]['atom_types']).all()
-                
-                atom_names_1 = bioassembly_dict['atom_array'][full_mask].atom_name
-                atom_names_2 = apo_coords_dict[chain_id]['atom_types']
-
-                if not (atom_names_1 == atom_names_2).all():
-                    mismatch_idx = np.where(atom_names_1 != atom_names_2)[0][0]
-                    print(f"[Atom mismatch] chain {chain_id}, index = {mismatch_idx}")
-                    print(f"  bioassembly atom : {atom_names_1[mismatch_idx]}")
-                    print(f"  apo atom         : {atom_names_2[mismatch_idx]}")
-                    raise ValueError("Atom names do not match")
-                is_protein_num += apo_coords_dict[chain_id]['coords'].shape[0]
-            
-            assert is_protein_num == protein_mask.sum()
-            is_ligand = bioassembly_dict['atom_array'].is_ligand.astype(bool)
-            rdkit_coords = bioassembly_dict['atom_array'].ref_pos[is_ligand]
-            rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
-            
-            bioassembly_dict['rdkit_coords'] = rdkit_coords
-            
-            assert is_protein_num + is_ligand.sum()  == bioassembly_dict['atom_array'].shape[0]
-            
-            # random rotation for the rdkit
-            rotation = Rotation.random(num=1)
-            rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
-            rot_matrix = rot_matrix.squeeze(0).numpy()
-            rdkit_coords = rdkit_coords @ rot_matrix.T
-            
-            
-            apo_atom_coords[is_ligand] = rdkit_coords
-            bioassembly_dict['apo_atom_array'] = apo_atom_coords
-            
-            protein_coords = bioassembly_dict['apo_atom_array'][protein_mask]
-            protein_coords = protein_coords - protein_coords.mean(axis=0)
-            bioassembly_dict['apo_atom_array'][protein_mask] = protein_coords
-            complex_apo_coords = bioassembly_dict['apo_atom_array']
+            )
 
         
         # rdkit coordinate
-        if 'pdbbind' in self.name or 'posebustersv2' in self.name:
+        if _uses_precomputed_apo_coords(self.name):
+            apo_center_ligand_to_origin = True
             rdkit_coords = bioassembly_dict['rdkit_coords']
             apo_coords = bioassembly_dict['apo_coords']
             rdkit_idx = np.random.randint(rdkit_coords.shape[0])
@@ -1210,13 +1587,11 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
-        if (
-            'pdbbind' in self.name
-            or 'posebustersv2' in self.name
-            or 'posebusters_0925' in self.name
-            or _is_weighted_apo_dataset(self.name)
-        ) and self.use_apo_pos:
+        if _uses_apo_coords(self.name) and self.use_apo_pos:
             feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
+            feat['apo_center_ligand_to_origin'] = torch.tensor(
+                apo_center_ligand_to_origin
+            )
             if self.cropping_configs['crop_size'] > -1:
                 feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]
                  
@@ -1873,6 +2248,7 @@ def get_datasets(
         # Lig_atom_rename/shuffle_mols/shuffle_sym_ids do not affect the performance very much
         return {
             "name": dataset_name,
+            "stage": stage,
             **config_dict["base_info"],
             "cropping_configs": config_dict["cropping_configs"],
             "error_dir": error_dir,
@@ -1896,6 +2272,15 @@ def get_datasets(
     esm_config = configs.get("esm", None)
     
     use_apo_pos = configs.model.diffusion_module.use_apo_pos or configs.model.input_embedder.use_apo_pos
+    apo_ligand_init_mode = _normalize_apo_ligand_init_mode(
+        configs.ddbm_configs.get("ligand_init_mode", "protein_center")
+    )
+    apo_pocket_noise_sigma = float(
+        configs.ddbm_configs.get("apo_pocket_noise_sigma", 0.0)
+    )
+    apo_pocket_gt_csv = configs.ddbm_configs.get(
+        "apo_pocket_gt_csv", str(DEFAULT_APO_POCKET_GT_CSV)
+    )
     
     for train_name in data_config.train_sets:
         config_dict = data_config[train_name].to_dict()
@@ -1908,6 +2293,9 @@ def get_datasets(
         dataset_param["limits"] = data_config.get("limits", -1)
         dataset_param["esm_config"] = esm_config
         dataset_param["use_apo_pos"] = use_apo_pos
+        dataset_param["apo_ligand_init_mode"] = apo_ligand_init_mode
+        dataset_param["apo_pocket_noise_sigma"] = apo_pocket_noise_sigma
+        dataset_param["apo_pocket_gt_csv"] = apo_pocket_gt_csv
         train_dataset = BaseSingleDataset(**dataset_param)
         # for debug:
         # test_data = train_dataset[0]
@@ -1929,12 +2317,36 @@ def get_datasets(
     test_sets = data_config.test_sets
     for test_name in test_sets:
         config_dict = data_config[test_name].to_dict()
-        dataset_param = _get_dataset_param(
-            config_dict, dataset_name=test_name, stage="test"
-        )
-        dataset_param["esm_config"] = esm_config
-        dataset_param["ref_pos_augment"] = data_config.get("test_ref_pos_augment", True)
-        dataset_param["use_apo_pos"] = use_apo_pos
-        test_dataset = BaseSingleDataset(**dataset_param)
-        test_datasets[test_name] = test_dataset
+        test_modes: list[tuple[str, str]]
+        if (
+            apo_ligand_init_mode == "mixed_50_50"
+            and use_apo_pos
+            and _dataset_supports_apo_pocket_center(test_name)
+        ):
+            test_modes = [
+                (f"{test_name}__pocket_center", "pocket_center"),
+                (f"{test_name}__protein_center", "protein_center"),
+            ]
+        else:
+            fallback_mode = (
+                "protein_center"
+                if apo_ligand_init_mode == "mixed_50_50"
+                else apo_ligand_init_mode
+            )
+            test_modes = [(test_name, fallback_mode)]
+
+        for test_dataset_name, test_init_mode in test_modes:
+            dataset_param = _get_dataset_param(
+                config_dict, dataset_name=test_name, stage="test"
+            )
+            dataset_param["esm_config"] = esm_config
+            dataset_param["ref_pos_augment"] = data_config.get(
+                "test_ref_pos_augment", True
+            )
+            dataset_param["use_apo_pos"] = use_apo_pos
+            dataset_param["apo_ligand_init_mode"] = test_init_mode
+            dataset_param["apo_pocket_noise_sigma"] = 0.0
+            dataset_param["apo_pocket_gt_csv"] = apo_pocket_gt_csv
+            test_dataset = BaseSingleDataset(**dataset_param)
+            test_datasets[test_dataset_name] = test_dataset
     return train_dataset, test_datasets

@@ -1,10 +1,23 @@
 import os
 from Bio.PDB import PDBParser
 from Bio.Data.IUPACData import protein_letters_3to1
+import csv
+
 
 PDB_DIR = "/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected"
 biopython_parser = PDBParser(QUIET=True)
 
+csv_path = "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_complex.csv" 
+# "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_complex.csv"
+# '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_train.csv'
+
+def load_pdb_ids(csv_path):
+    pdb_ids = []
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            pdb_ids.append(row["pdb_id"].lower())
+    return pdb_ids
 
 def three_to_one(res3: str) -> str:
     return protein_letters_3to1.get(res3.capitalize(), "X")
@@ -57,6 +70,13 @@ print("Scanning directory:", PDB_DIR)
 
 results = []   # store (pdb_id, num_chains, num_entities, chain_entity_map)
 
+pdb_ids = load_pdb_ids(csv_path)
+
+print("Loaded pdb_ids:", pdb_ids)
+results = []
+
+# for pdb_id in pdb_ids:
+#     folder_path = os.path.join(PDB_DIR, pdb_id)
 for folder in sorted(os.listdir(PDB_DIR)):
     folder_path = os.path.join(PDB_DIR, folder)
     if not os.path.isdir(folder_path):

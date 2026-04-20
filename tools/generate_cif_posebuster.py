@@ -464,7 +464,7 @@ def load_ligand_preserve_order(lig_mol2, lig_sdf):
 # -------------------------
 # Main pipeline
 # -------------------------
-def merge_protein_and_ligand_to_full_mmcif(protein_pdb: str, ligand_mol2: str,  lig_sdf: str, output_cif: str, ligand_chain_hint: str = "L", apo_protein_pdb_path: str = "", rdkit_mol_path: str = ""):
+def merge_protein_and_ligand_to_full_mmcif(protein_pdb: str, ligand_mol2: str,  lig_sdf: str, output_cif: str, ligand_chain_hint: str = "L", apo_protein_pdb_path: str = "", rdkit_mol_path: str = "", ligand_resname: str = "UNL",):
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("protein", protein_pdb)
 
@@ -475,6 +475,10 @@ def merge_protein_and_ligand_to_full_mmcif(protein_pdb: str, ligand_mol2: str,  
         raise RuntimeError("RDKit cannot parse ligand mol2 file")
     ligand_pdb = Chem.MolToPDBBlock(ligand)
     ligand_struct = parser.get_structure("lig", StringIO(ligand_pdb))
+    for chain in ligand_struct[0]:
+        for res in chain:
+            res.resname = ligand_resname[:3]
+
 
     model = structure[0]
     lig_model = ligand_struct[0]
@@ -588,6 +592,7 @@ def batch_convert_to_mmcif(root_dir, chain_hint="L"):
 
     for folder in tqdm(subfolders, desc="Processing folders"):
         tag = folder.name  # 如 5opc
+        lig_resname = tag.split("_", 1)[1] 
 
         if not check_folder_valid(folder, tag):
             continue   # 跳过不完整的文件夹
@@ -611,17 +616,19 @@ def batch_convert_to_mmcif(root_dir, chain_hint="L"):
                 output_cif=str(output_cif),
                 ligand_chain_hint=chain_hint,
                 apo_protein_pdb_path=str(apo_protein),# 如需要可设置
-                rdkit_mol_path=str(ligand_rdkit)
+                rdkit_mol_path=str(ligand_rdkit),
+                ligand_resname=lig_resname,
             )
-            # merge_protein_and_ligand_to_full_mmcif(
-            #     protein_pdb=str(apo_protein),
-            #     ligand_mol2=str(ligand_sdf),
-            #     lig_sdf=str(ligand_sdf),
-            #     output_cif=str(output_cif2),
-            #     ligand_chain_hint=chain_hint,
-            #     apo_protein_pdb_path=str(apo_protein),# 如需要可设置
-            #     rdkit_mol_path=str(ligand_rdkit)
-            # )
+            merge_protein_and_ligand_to_full_mmcif(
+                protein_pdb=str(apo_protein),
+                ligand_mol2=str(ligand_rdkit),
+                lig_sdf=str(ligand_rdkit),
+                output_cif=str(output_cif2),
+                ligand_chain_hint=chain_hint,
+                apo_protein_pdb_path=str(apo_protein),# 如需要可设置
+                rdkit_mol_path=str(ligand_rdkit),
+                ligand_resname=lig_resname,
+            )
         except Exception as e:
             print(f"处理文件夹 {folder} 时出错: {e}")
             continue
@@ -629,4 +636,5 @@ def batch_convert_to_mmcif(root_dir, chain_hint="L"):
 
 if __name__ == "__main__":
     root_dir = "/vepfs-mlp2/mlp-public/shikunfeng/Datas/posebusters/"
+    root_dir = '/vepfs-mlp2/mlp-public/shikunfeng/Datas/posebusters/posebuster_single'
     batch_convert_to_mmcif(root_dir)

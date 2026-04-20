@@ -13,12 +13,16 @@
 # limitations under the License.
 
 # pylint: disable=C0114,C0301
+import os
+
 from protenix.config.extend_types import (
     GlobalConfigValue,
     ListValue,
     RequiredValue,
     ValueMaybeNone,
 )
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 basic_configs = {
     "project": RequiredValue(str),
@@ -172,6 +176,17 @@ model_configs = {
       "lognorm_std": 1.0,
       "lognorm_mean": 0.0,
       "raw_sigma": False,
+      "ligand_init_mode": "protein_center",
+      "apo_pocket_noise_sigma": 0.0,
+      "apo_pocket_gt_csv": os.path.join(
+          PROJECT_ROOT,
+          "tools/v3_data/apo_pocket_centers_local_align.slim.csv",
+      ),
+      "eval_with_step1_bootstrap": False,
+      "eval_step1_bootstrap_n_step": 1,
+      "eval_step1_bootstrap_prediction_index": 0,
+      "eval_step1_bootstrap_shell_min": 6.0,
+      "eval_step1_bootstrap_shell_max": 10.0,
       
       "pred_mode": "vp",
       "sigma_max": 1.0,

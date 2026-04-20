@@ -1117,7 +1117,7 @@ def kabsch_torch_batched(P, Q):
     # return R, t, rmsd
     return torch.matmul(p, R.transpose(1, 2)), q, rmsd
 
-def kabsch_torch_batched_protein(P, Q, ligand_mask):
+def kabsch_torch_batched_protein(P, Q, ligand_mask, center_ligand_to_origin: bool = True):
     """
     Batched Kabsch alignment using ONLY protein atoms (mask=0),
     but applies the rotation to ALL atoms (including ligand).
@@ -1182,6 +1182,9 @@ def kabsch_torch_batched_protein(P, Q, ligand_mask):
         diff2.sum(dim=(1, 2)) / num_protein.squeeze()
     )
     
+    if not center_ligand_to_origin:
+        return P_aligned, Q_centered, rmsd
+
     # put the ligand to the center
     ligand_mask = ligand_mask.to(bool)
     mask = ligand_mask.view(1, -1, 1)
@@ -1353,7 +1356,17 @@ def sample_diffusion_training_ddbm(
     # x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
     is_ligand_mask = input_feature_dict['is_ligand']
     x_start1, x_gt_augment1, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
-    x_start, x_gt_augment, rmsd2 = kabsch_torch_batched_protein(apo_atom_array, x_gt_augment, is_ligand_mask.to(bool))
+    center_ligand_to_origin = True
+    if "apo_center_ligand_to_origin" in input_feature_dict:
+        center_ligand_to_origin = bool(
+            input_feature_dict["apo_center_ligand_to_origin"].item()
+        )
+    x_start, x_gt_augment, rmsd2 = kabsch_torch_batched_protein(
+        apo_atom_array,
+        x_gt_augment,
+        is_ligand_mask.to(bool),
+        center_ligand_to_origin=center_ligand_to_origin,
+    )
     input_feature_dict['apo_atom_array'] = x_start
     
     new_rmsd = torch.sqrt(torch.sum((x_start - x_gt_augment)**2, dim=(-1, -2)) / x_gt_augment.size(-2))
